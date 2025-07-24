@@ -2,6 +2,8 @@ import torch as ch
 from torch import nn
 import dill
 import os
+
+from torch.cpu import is_available
 from .tools import helpers, constants
 from .attacker import AttackerModel
 
@@ -107,7 +109,13 @@ def make_and_restore_model(*_, arch, dataset, resume_path=None,
 
     if parallel:
         model = ch.nn.DataParallel(model)
-    model = model.cuda()
+    
+    if ch.cuda.is_available():
+        model = model.cuda()
+    elif ch.backends.mps.is_available():
+        model = model.to("mps")
+    else:
+        model.to("cpu")
 
     return model, checkpoint
 

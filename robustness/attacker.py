@@ -136,7 +136,9 @@ class Attacker(ch.nn.Module):
         # Can provide a different input to make the feasible set around
         # instead of the initial point
         if orig_input is None: orig_input = x.detach()
-        orig_input = orig_input.cuda()
+        # orig_input = orig_input.cuda()
+        device = "cuda" if ch.cuda.is_available() else ("mps" if ch.backends.mps.is_available() else "cpu")
+        orig_input.to(device)
 
         # Multiplier for gradient ascent [untargeted] or descent [targeted]
         m = -1 if targeted else 1

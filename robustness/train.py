@@ -85,7 +85,8 @@ def make_optimizer_and_schedule(args, model, checkpoint, params):
     if args.mixed_precision:
         model.to('cuda')
         model, optimizer = amp.initialize(model, optimizer, 'O1')
-
+    else:
+        model.to("mps" if ch.backends.mps.is_available() else "cpu")
     # Make schedule
     schedule = None
     if args.custom_lr_multiplier == 'cyclic':
@@ -295,7 +296,11 @@ def train_model(args, model, loaders, *, checkpoint=None, dp_device_ids=None,
 
     # Put the model into parallel mode
     assert not hasattr(model, "module"), "model is already in DataParallel."
-    model = ch.nn.DataParallel(model, device_ids=dp_device_ids).cuda()
+    if ch.cuda.is_available():
+        model = ch.nn.DataParallel(model, device_ids=dp_device_ids).cuda()
+    else:
+        model = ch.nn.DataParallel(model, device_ids=dp_device_ids)
+
 
     best_prec1, start_epoch = (0, 0)
     if checkpoint:
@@ -441,9 +446,13 @@ def _model_loop(args, loop_type, loader, model, opt, epoch, adv, writer):
         }
 
     iterator = tqdm(enumerate(loader), total=len(loader))
+    device = "cuda" if ch.cuda.is_available() else ("mps" if ch.backends.mps.is_available() else "cpu")
     for i, (inp, target) in iterator:
        # measure data loading time
-        target = target.cuda(non_blocking=True)
+       
+        # target = target.cuda(non_blocking=True)
+        target = target.to(device, non_blocking=True)
+
         output, final_inp = model(inp, target=target, make_adv=adv,
                                   **attack_kwargs)
         loss = train_criterion(output, target)

@@ -1,3 +1,4 @@
+from pandas.tests.copy_view.test_indexing import backend
 import torch as ch
 
 import shutil
@@ -6,6 +7,7 @@ import os
 from subprocess import Popen, PIPE
 import pandas as pd
 from PIL import Image
+from torch import mps
 from . import constants
 
 def has_attr(obj, k):
@@ -104,7 +106,8 @@ class DataPrefetcher():
     def __init__(self, loader, stop_after=None):
         self.loader = loader
         self.dataset = loader.dataset
-        self.stream = ch.cuda.Stream()
+        self.device = "cuda" if ch.cuda.is_available() else ("mps" if ch.backends.mps.is_available() else "cpu")
+        # self.stream = ch.cuda.Stream()
         self.stop_after = stop_after
         self.next_input = None
         self.next_target = None
@@ -119,16 +122,18 @@ class DataPrefetcher():
             self.next_input = None
             self.next_target = None
             return
-        with ch.cuda.stream(self.stream):
-            self.next_input = self.next_input.cuda(non_blocking=True)
-            self.next_target = self.next_target.cuda(non_blocking=True)
+        # with ch.cuda.stream(self.stream):
+        #     self.next_input = self.next_input.cuda(non_blocking=True)
+        #     self.next_target = self.next_target.cuda(non_blocking=True)
+        self.next_input = self.next_input.to(self.device, non_blocking=True)
+        self.next_target = self.next_target.to(self.device, non_blocking=True)
 
     def __iter__(self):
         count = 0
         self.loaditer = iter(self.loader)
         self.preload()
         while self.next_input is not None:
-            ch.cuda.current_stream().wait_stream(self.stream)
+            # ch.cuda.current_stream().wait_stream(self.stream)
             input = self.next_input
             target = self.next_target
             self.preload()

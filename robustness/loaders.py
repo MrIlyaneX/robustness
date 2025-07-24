@@ -85,12 +85,13 @@ def make_loaders(workers, batch_size, transforms, data_path, data_aug=True,
 
         train_set = Subset(train_set, subset)
 
+    pin_memory = True if ch.cuda.is_available() else (False if ch.backends.mps.is_available() else True)
     if not only_val:
         train_loader = DataLoader(train_set, batch_size=batch_size, 
-            shuffle=shuffle_train, num_workers=workers, pin_memory=True)
+            shuffle=shuffle_train, num_workers=workers, pin_memory=pin_memory)
 
     test_loader = DataLoader(test_set, batch_size=val_batch_size, 
-            shuffle=shuffle_val, num_workers=workers, pin_memory=True)
+            shuffle=shuffle_val, num_workers=workers, pin_memory=pin_memory)
 
     if only_val:
         return None, test_loader
