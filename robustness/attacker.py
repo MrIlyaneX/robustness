@@ -3,7 +3,7 @@
 ignored.**
 
 This module houses the :class:`robustness.attacker.Attacker` and
-:class:`robustness.attacker.AttackerModel` classes. 
+:class:`robustness.attacker.AttackerModel` classes.
 
 :class:`~robustness.attacker.Attacker` is an internal class that should not be
 imported/called from outside the library.
@@ -30,6 +30,7 @@ called directly---instead, these arguments are passed along from
 import torch as ch
 import dill
 import os
+
 if int(os.environ.get("NOTEBOOK_MODE", 0)) == 1:
     from tqdm import tqdm_notebook as tqdm
 else:
@@ -39,12 +40,13 @@ from .tools import helpers
 from . import attack_steps
 
 STEPS = {
-    'inf': attack_steps.LinfStep,
-    '2': attack_steps.L2Step,
-    'unconstrained': attack_steps.UnconstrainedStep,
-    'fourier': attack_steps.FourierStep,
-    'random_smooth': attack_steps.RandomStep
+    "inf": attack_steps.LinfStep,
+    "2": attack_steps.L2Step,
+    "unconstrained": attack_steps.UnconstrainedStep,
+    "fourier": attack_steps.FourierStep,
+    "random_smooth": attack_steps.RandomStep,
 }
+
 
 class Attacker(ch.nn.Module):
     """
@@ -57,6 +59,7 @@ class Attacker(ch.nn.Module):
     However, the :meth:`robustness.Attacker.forward` function below
     documents the arguments supported for adversarial attacks specifically.
     """
+
     def __init__(self, model, dataset):
         """
         Initialize the Attacker
@@ -69,11 +72,27 @@ class Attacker(ch.nn.Module):
         self.normalize = helpers.InputNormalize(dataset.mean, dataset.std)
         self.model = model
 
-    def forward(self, x, target, *_, constraint, eps, step_size, iterations,
-                random_start=False, random_restarts=False, do_tqdm=False,
-                targeted=False, custom_loss=None, should_normalize=True,
-                orig_input=None, use_best=True, return_image=True,
-                est_grad=None, mixed_precision=False):
+    def forward(
+        self,
+        x,
+        target,
+        *_,
+        constraint,
+        eps,
+        step_size,
+        iterations,
+        random_start=False,
+        random_restarts=False,
+        do_tqdm=False,
+        targeted=False,
+        custom_loss=None,
+        should_normalize=True,
+        orig_input=None,
+        use_best=True,
+        return_image=True,
+        est_grad=None,
+        mixed_precision=False,
+    ):
         """
         Implementation of forward (finds adversarial examples). Note that
         this does **not** perform inference and should not be called
@@ -135,24 +154,29 @@ class Attacker(ch.nn.Module):
         """
         # Can provide a different input to make the feasible set around
         # instead of the initial point
-        if orig_input is None: orig_input = x.detach()
+        if orig_input is None:
+            orig_input = x.detach()
         # orig_input = orig_input.cuda()
-        device = "cuda" if ch.cuda.is_available() else ("mps" if ch.backends.mps.is_available() else "cpu")
+        device = (
+            "cuda"
+            if ch.cuda.is_available()
+            else ("mps" if ch.backends.mps.is_available() else "cpu")
+        )
         orig_input.to(device)
 
         # Multiplier for gradient ascent [untargeted] or descent [targeted]
         m = -1 if targeted else 1
 
         # Initialize step class and attacker criterion
-        criterion = ch.nn.CrossEntropyLoss(reduction='none')
+        criterion = ch.nn.CrossEntropyLoss(reduction="none")
         step_class = STEPS[constraint] if isinstance(constraint, str) else constraint
-        step = step_class(eps=eps, orig_input=orig_input, step_size=step_size) 
+        step = step_class(eps=eps, orig_input=orig_input, step_size=step_size)
 
         def calc_loss(inp, target):
-            '''
+            """
             Calculates the loss of an input with respect to target labels
             Uses custom loss (if provided) otherwise the criterion
-            '''
+            """
             if should_normalize:
                 inp = self.normalize(inp)
             output = self.model(inp)
@@ -168,7 +192,8 @@ class Attacker(ch.nn.Module):
                 x = step.random_perturb(x)
 
             iterator = range(iterations)
-            if do_tqdm: iterator = tqdm(iterator)
+            if do_tqdm:
+                iterator = tqdm(iterator)
 
             # Keep track of the "best" (worst-case) loss and its
             # corresponding input
@@ -191,8 +216,9 @@ class Attacker(ch.nn.Module):
             for _ in iterator:
                 x = x.clone().detach().requires_grad_(True)
                 losses, out = calc_loss(step.to_image(x), target)
-                assert losses.shape[0] == x.shape[0], \
-                        'Shape of losses must match input!'
+                assert losses.shape[0] == x.shape[0], (
+                    "Shape of losses must match input!"
+                )
 
                 loss = ch.mean(losses)
 
@@ -202,8 +228,8 @@ class Attacker(ch.nn.Module):
                             sl.backward()
                         grad = x.grad.detach()
                         x.grad.zero_()
-                    elif (est_grad is None):
-                        grad, = ch.autograd.grad(m * loss, [x])
+                    elif est_grad is None:
+                        (grad,) = ch.autograd.grad(m * loss, [x])
                     else:
                         f = lambda _x, _y: m * calc_loss(step.to_image(_x), _y)[0]
                         grad = helpers.calc_est_grad(f, x, target, *est_grad)
@@ -216,10 +242,11 @@ class Attacker(ch.nn.Module):
 
                     x = step.step(x, grad)
                     x = step.project(x)
-                    if do_tqdm: iterator.set_description("Current loss: {l}".format(l=loss))
+                    if do_tqdm:
+                        iterator.set_description("Current loss: {l}".format(l=loss))
 
             # Save computation (don't compute last loss) if not use_best
-            if not use_best: 
+            if not use_best:
                 ret = x.clone().detach()
                 return step.to_image(ret) if return_image else ret
 
@@ -241,7 +268,7 @@ class Attacker(ch.nn.Module):
                     to_ret = adv.detach()
 
                 _, output = calc_loss(adv, target)
-                corr, = helpers.accuracy(output, target, topk=(1,), exact=True)
+                (corr,) = helpers.accuracy(output, target, topk=(1,), exact=True)
                 corr = corr.byte()
                 misclass = ~corr
                 to_ret[misclass] = adv[misclass]
@@ -251,6 +278,7 @@ class Attacker(ch.nn.Module):
             adv_ret = get_adv_examples(x)
 
         return adv_ret
+
 
 class AttackerModel(ch.nn.Module):
     """
@@ -267,17 +295,27 @@ class AttackerModel(ch.nn.Module):
         out = model(x) # normal inference (no label needed)
 
     More code examples available in the documentation for `forward`.
-    For a more comprehensive overview of this class, see 
+    For a more comprehensive overview of this class, see
     :doc:`our detailed walkthrough <../example_usage/input_space_manipulation>`.
     """
+
     def __init__(self, model, dataset):
         super(AttackerModel, self).__init__()
         self.normalizer = helpers.InputNormalize(dataset.mean, dataset.std)
         self.model = model
         self.attacker = Attacker(model, dataset)
 
-    def forward(self, inp, target=None, make_adv=False, with_latent=False,
-                fake_relu=False, no_relu=False, with_image=True, **attacker_kwargs):
+    def forward(
+        self,
+        inp,
+        target=None,
+        make_adv=False,
+        with_latent=False,
+        fake_relu=False,
+        no_relu=False,
+        with_image=True,
+        **attacker_kwargs,
+    ):
         """
         Main function for running inference and generating adversarial
         examples for a model.
@@ -325,8 +363,12 @@ class AttackerModel(ch.nn.Module):
         if no_relu and fake_relu:
             raise ValueError("Options 'no_relu' and 'fake_relu' are exclusive")
 
-        output = self.model(normalized_inp, with_latent=with_latent,
-                                fake_relu=fake_relu, no_relu=no_relu)
+        output = self.model(
+            normalized_inp,
+            with_latent=with_latent,
+            fake_relu=fake_relu,
+            no_relu=no_relu,
+        )
         if with_image:
             return (output, inp)
         return output

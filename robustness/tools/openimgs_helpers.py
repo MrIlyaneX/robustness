@@ -9,84 +9,84 @@ from .folder import default_loader, IMG_EXTENSIONS
 
 target_transform_oi = ch.Tensor
 
+
 def load_class_desc(data_dir):
     """Returns map from cid to class name."""
-    
+
     class_names = {}
-    
-    with open(os.path.join(data_dir, "metadata", "class-descriptions-boxable.csv"), newline="") as csvfile:
-        for ri, row in enumerate(csv.reader(csvfile, delimiter=' ', quotechar='|')):
-            cid = row[0].split(',')[0]
-            cname = ' '.join([row[0].split(',')[1]] + row[1:])
+
+    with open(
+        os.path.join(data_dir, "metadata", "class-descriptions-boxable.csv"), newline=""
+    ) as csvfile:
+        for ri, row in enumerate(csv.reader(csvfile, delimiter=" ", quotechar="|")):
+            cid = row[0].split(",")[0]
+            cname = " ".join([row[0].split(",")[1]] + row[1:])
             assert cid not in class_names
             class_names[cid] = cname
-            
+
     return class_names
+
 
 def get_image_annotations_mode(class_names, data_dir, mode="train"):
     """Returns map from img number to label (along with verification
-       source and confidence)"""
-    
+    source and confidence)"""
+
     assert mode in set(["train", "test", "validation"])
-    lab_dir = os.path.join(data_dir, 
-                           "labels", 
-                           f"{mode}-annotations-human-imagelabels-boxable.csv")
+    lab_dir = os.path.join(
+        data_dir, "labels", f"{mode}-annotations-human-imagelabels-boxable.csv"
+    )
     prefix = "oidv6-" if mode == "train" else ""
-    anno_dir = os.path.join(data_dir, 
-                            "boxes", 
-                            f"{prefix}{mode}-annotations-bbox.csv")
-    
+    anno_dir = os.path.join(data_dir, "boxes", f"{prefix}{mode}-annotations-bbox.csv")
+
     img_to_label = {}
     with open(lab_dir, newline="") as csvfile:
-        for ri, row in enumerate(csv.reader(csvfile, delimiter=' ', quotechar='|')):
-            if ri == 0: continue
+        for ri, row in enumerate(csv.reader(csvfile, delimiter=" ", quotechar="|")):
+            if ri == 0:
+                continue
 
             assert len(row) == 1
-            im_id, ver, cno, conf = tuple(row[0].split(","))            
+            im_id, ver, cno, conf = tuple(row[0].split(","))
             cno = class_names[cno]
 
-            if im_id not in img_to_label: 
+            if im_id not in img_to_label:
                 img_to_label[im_id] = {}
-                
+
             if cno not in img_to_label[im_id]:
-                img_to_label[im_id][cno] = {'ver': [], 'conf': []}
-            img_to_label[im_id][cno]['ver'].append(ver)
-            img_to_label[im_id][cno]['conf'].append(conf)
-        
-        
+                img_to_label[im_id][cno] = {"ver": [], "conf": []}
+            img_to_label[im_id][cno]["ver"].append(ver)
+            img_to_label[im_id][cno]["conf"].append(conf)
+
     for im_id in img_to_label:
         for lab in img_to_label[im_id]:
-            assert len(np.unique(img_to_label[im_id][lab]['conf'])) == 1
-            img_to_label[im_id][lab]['conf'] = img_to_label[im_id][lab]['conf'][0]
-            
+            assert len(np.unique(img_to_label[im_id][lab]["conf"])) == 1
+            img_to_label[im_id][lab]["conf"] = img_to_label[im_id][lab]["conf"][0]
+
     with open(anno_dir, newline="") as csvfile:
-        for ri, row in enumerate(csv.reader(csvfile, delimiter=' ', quotechar='|')):
-            if ri == 0: continue
+        for ri, row in enumerate(csv.reader(csvfile, delimiter=" ", quotechar="|")):
+            if ri == 0:
+                continue
             assert len(row) == 1
             rs = row[0].split(",")
             im_id, src, cno = tuple(rs[:3])
             cno = class_names[cno]
-            
+
             box = [float(v) for v in rs[4:8]]
-            if 'box' not in img_to_label[im_id][cno] or src == 'activemil': 
-                img_to_label[im_id][cno]['box'] = box
-    
+            if "box" not in img_to_label[im_id][cno] or src == "activemil":
+                img_to_label[im_id][cno]["box"] = box
+
     return img_to_label
 
 
-def make_dataset(dir, mode, sample_info, 
-                 class_to_idx, class_to_idx_comp, extensions):
-    
+def make_dataset(dir, mode, sample_info, class_to_idx, class_to_idx_comp, extensions):
     images = []
     allowed_labels = set(class_to_idx.keys())
     Nclasses = len(set(class_to_idx.values()))
-    
+
     for k, v in sample_info.items():
-        
         img_path = os.path.join(dir, "images", mode, k + ".jpg")
-        
-        pos_labels = set([l for l in v.keys() if v[l]['conf'][0] == '1'])
-        neg_labels = set([l for l in v.keys() if v[l]['conf'][0] == '0'])
+
+        pos_labels = set([l for l in v.keys() if v[l]["conf"][0] == "1"])
+        neg_labels = set([l for l in v.keys() if v[l]["conf"][0] == "0"])
 
         pos_labels = pos_labels.intersection(allowed_labels)
         neg_labels = neg_labels.intersection(allowed_labels)
@@ -102,8 +102,9 @@ def make_dataset(dir, mode, sample_info,
                 all_labels[class_to_idx_comp[n]] = -1
             item = (img_path, label, all_labels)
             images.append(item)
-        
+
     return images
+
 
 class OIDatasetFolder(data.Dataset):
     """A generic data loader where the samples are arranged in this way: ::
@@ -123,27 +124,37 @@ class OIDatasetFolder(data.Dataset):
         targets (list): The class_index value for each image in the dataset
     """
 
-    def __init__(self, root, train=True, extensions=IMG_EXTENSIONS, 
-                 loader=default_loader, transform=None,
-                 target_transform=target_transform_oi, label_mapping=None,
-                 download=False):
+    def __init__(
+        self,
+        root,
+        train=True,
+        extensions=IMG_EXTENSIONS,
+        loader=default_loader,
+        transform=None,
+        target_transform=target_transform_oi,
+        label_mapping=None,
+        download=False,
+    ):
         classes, class_to_idx, code_to_class = self._find_classes(root)
         class_to_idx_comp = {k: v for k, v in class_to_idx.items()}
         if label_mapping is not None:
             classes, class_to_idx = label_mapping(classes, class_to_idx)
-        
+
         mode = "train" if train else "test"
-        sample_info = get_image_annotations_mode(code_to_class,
-                                                 mode=mode,
-                                                 data_dir=root)
-    
-    
-        samples = make_dataset(root, mode, sample_info, 
-                                class_to_idx, class_to_idx_comp,
-                                extensions)
+        sample_info = get_image_annotations_mode(
+            code_to_class, mode=mode, data_dir=root
+        )
+
+        samples = make_dataset(
+            root, mode, sample_info, class_to_idx, class_to_idx_comp, extensions
+        )
         if len(samples) == 0:
-            raise(RuntimeError("Found 0 files in subfolders of: " + root + "\n"
-                               "Supported extensions are: " + ",".join(extensions)))
+            raise (
+                RuntimeError(
+                    "Found 0 files in subfolders of: " + root + "\n"
+                    "Supported extensions are: " + ",".join(extensions)
+                )
+            )
 
         self.root = root
         self.loader = loader
@@ -188,19 +199,25 @@ class OIDatasetFolder(data.Dataset):
         return len(self.samples)
 
     def __repr__(self):
-        fmt_str = 'Dataset ' + self.__class__.__name__ + '\n'
-        fmt_str += '    Number of datapoints: {}\n'.format(self.__len__())
-        fmt_str += '    Root Location: {}\n'.format(self.root)
-        tmp = '    Transforms (if any): '
-        fmt_str += '{0}{1}\n'.format(tmp, self.transform.__repr__().replace('\n', '\n' + ' ' * len(tmp)))
-        tmp = '    Target Transforms (if any): '
-        fmt_str += '{0}{1}'.format(tmp, self.target_transform.__repr__().replace('\n', '\n' + ' ' * len(tmp)))
+        fmt_str = "Dataset " + self.__class__.__name__ + "\n"
+        fmt_str += "    Number of datapoints: {}\n".format(self.__len__())
+        fmt_str += "    Root Location: {}\n".format(self.root)
+        tmp = "    Transforms (if any): "
+        fmt_str += "{0}{1}\n".format(
+            tmp, self.transform.__repr__().replace("\n", "\n" + " " * len(tmp))
+        )
+        tmp = "    Target Transforms (if any): "
+        fmt_str += "{0}{1}".format(
+            tmp, self.target_transform.__repr__().replace("\n", "\n" + " " * len(tmp))
+        )
         return fmt_str
+
 
 def get_label_map(data_dir):
     CLASS_NAMES = load_class_desc(data_dir)
     label_map = {i: v for i, v in enumerate(CLASS_NAMES.values())}
     return label_map
+
 
 def get_labels(targ, label_map):
     pos_labels, neg_labels = [], []

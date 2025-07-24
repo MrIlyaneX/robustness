@@ -3,13 +3,20 @@ import torch.nn as nn
 import torch.utils.model_zoo as model_zoo
 from ..tools.custom_modules import SequentialWithArgs, FakeReLU
 
-__all__ = ['leaky_resnet18', 'leaky_resnet34', 'leaky_resnet50',
-    'leaky_resnet101', 'leaky_resnet152']
+__all__ = [
+    "leaky_resnet18",
+    "leaky_resnet34",
+    "leaky_resnet50",
+    "leaky_resnet101",
+    "leaky_resnet152",
+]
+
 
 def conv3x3(in_planes, out_planes, stride=1):
     """3x3 convolution with padding"""
-    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
-                     padding=1, bias=False)
+    return nn.Conv2d(
+        in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False
+    )
 
 
 def conv1x1(in_planes, out_planes, stride=1):
@@ -52,6 +59,7 @@ class BasicBlock(nn.Module):
             return out
         return self.relu(out)
 
+
 class Bottleneck(nn.Module):
     expansion = 4
 
@@ -93,12 +101,12 @@ class Bottleneck(nn.Module):
 
         return self.relu(out)
 
+
 class ResNet(nn.Module):
     def __init__(self, block, layers, num_classes=1000, zero_init_residual=False):
         super(ResNet, self).__init__()
         self.inplanes = 64
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,
-                               bias=False)
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.bn1 = nn.BatchNorm2d(64)
         self.relu = nn.LeakyReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
@@ -111,7 +119,7 @@ class ResNet(nn.Module):
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
@@ -160,6 +168,7 @@ class ResNet(nn.Module):
             return final, pre_out
         return final
 
+
 def leaky_resnet18(pretrained=False, **kwargs):
     """Constructs a ResNet-18 model.
 
@@ -167,7 +176,8 @@ def leaky_resnet18(pretrained=False, **kwargs):
         pretrained (bool): If True, returns a model pre-trained on ImageNet
     """
     model = ResNet(BasicBlock, [2, 2, 2, 2], **kwargs)
-    if pretrained: raise NotImplementedError
+    if pretrained:
+        raise NotImplementedError
     return model
 
 
@@ -178,7 +188,8 @@ def leaky_resnet34(pretrained=False, **kwargs):
         pretrained (bool): If True, returns a model pre-trained on ImageNet
     """
     model = ResNet(BasicBlock, [3, 4, 6, 3], **kwargs)
-    if pretrained: raise NotImplementedError
+    if pretrained:
+        raise NotImplementedError
     return model
 
 
@@ -189,7 +200,8 @@ def leaky_resnet50(pretrained=False, **kwargs):
         pretrained (bool): If True, returns a model pre-trained on ImageNet
     """
     model = ResNet(Bottleneck, [3, 4, 6, 3], **kwargs)
-    if pretrained: raise NotImplementedError
+    if pretrained:
+        raise NotImplementedError
     return model
 
 
@@ -200,7 +212,8 @@ def leaky_resnet101(pretrained=False, **kwargs):
         pretrained (bool): If True, returns a model pre-trained on ImageNet
     """
     model = ResNet(Bottleneck, [3, 4, 23, 3], **kwargs)
-    if pretrained: raise NotImplementedError
+    if pretrained:
+        raise NotImplementedError
     return model
 
 
@@ -211,5 +224,6 @@ def leaky_resnet152(pretrained=False, **kwargs):
         pretrained (bool): If True, returns a model pre-trained on ImageNet
     """
     model = ResNet(Bottleneck, [3, 8, 36, 3], **kwargs)
-    if pretrained: raise NotImplementedError
+    if pretrained:
+        raise NotImplementedError
     return model

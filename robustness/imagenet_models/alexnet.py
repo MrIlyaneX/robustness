@@ -2,11 +2,12 @@ import torch.nn as nn
 from torch.hub import load_state_dict_from_url
 from ..tools.custom_modules import FakeReLUM
 
-__all__ = ['AlexNet', 'alexnet']
+__all__ = ["AlexNet", "alexnet"]
 
 model_urls = {
-    'alexnet': 'https://download.pytorch.org/models/alexnet-owt-4df8aa71.pth',
+    "alexnet": "https://download.pytorch.org/models/alexnet-owt-4df8aa71.pth",
 }
+
 
 class AlexNet(nn.Module):
     def __init__(self, num_classes=1000):
@@ -43,8 +44,9 @@ class AlexNet(nn.Module):
         x = self.avgpool(x)
         x = x.view(x.size(0), 256 * 6 * 6)
         x_latent = self.classifier(x)
-        x_relu = self.last_relu_fake(x_latent) if fake_relu \
-                    else self.last_relu(x_latent)
+        x_relu = (
+            self.last_relu_fake(x_latent) if fake_relu else self.last_relu(x_latent)
+        )
         x_out = self.last_layer(x_relu)
 
         if with_latent and no_relu:
@@ -52,6 +54,7 @@ class AlexNet(nn.Module):
         if with_latent:
             return x_out, x_relu
         return x_out
+
 
 def alexnet(pretrained=False, progress=True, **kwargs):
     r"""AlexNet model architecture from the
@@ -63,7 +66,6 @@ def alexnet(pretrained=False, progress=True, **kwargs):
     """
     model = AlexNet(**kwargs)
     if pretrained:
-        state_dict = load_state_dict_from_url(model_urls['alexnet'],
-                                              progress=progress)
+        state_dict = load_state_dict_from_url(model_urls["alexnet"], progress=progress)
         model.load_state_dict(state_dict)
     return model

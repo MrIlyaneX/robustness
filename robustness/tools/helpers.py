@@ -10,59 +10,68 @@ from PIL import Image
 from torch import mps
 from . import constants
 
+
 def has_attr(obj, k):
     """Checks both that obj.k exists and is not equal to None"""
     try:
-        return (getattr(obj, k) is not None)
+        return getattr(obj, k) is not None
     except KeyError as e:
         return False
     except AttributeError as e:
         return False
 
+
 def calc_est_grad(func, x, y, rad, num_samples):
     B, *_ = x.shape
-    Q = num_samples//2
+    Q = num_samples // 2
     N = len(x.shape) - 1
     with ch.no_grad():
         # Q * B * C * H * W
-        extender = [1]*N
+        extender = [1] * N
         queries = x.repeat(Q, *extender)
         noise = ch.randn_like(queries)
-        norm = noise.view(B*Q, -1).norm(dim=-1).view(B*Q, *extender)
+        norm = noise.view(B * Q, -1).norm(dim=-1).view(B * Q, *extender)
         noise = noise / norm
         noise = ch.cat([-noise, noise])
         queries = ch.cat([queries, queries])
         y_shape = [1] * (len(y.shape) - 1)
-        l = func(queries + rad * noise, y.repeat(2*Q, *y_shape)).view(-1, *extender) 
-        grad = (l.view(2*Q, B, *extender) * noise.view(2*Q, B, *noise.shape[1:])).mean(dim=0)
+        l = func(queries + rad * noise, y.repeat(2 * Q, *y_shape)).view(-1, *extender)
+        grad = (
+            l.view(2 * Q, B, *extender) * noise.view(2 * Q, B, *noise.shape[1:])
+        ).mean(dim=0)
     return grad
 
+
 def ckpt_at_epoch(num):
-    return '%s_%s' % (num, constants.CKPT_NAME)
+    return "%s_%s" % (num, constants.CKPT_NAME)
+
 
 def accuracy(output, target, topk=(1,), exact=False):
     """
-        Computes the top-k accuracy for the specified values of k
+    Computes the top-k accuracy for the specified values of k
 
-        Args:
-            output (ch.tensor) : model output (N, classes) or (N, attributes) 
-                for sigmoid/multitask binary classification
-            target (ch.tensor) : correct labels (N,) [multiclass] or (N,
-                attributes) [multitask binary]
-            topk (tuple) : for each item "k" in this tuple, this method
-                will return the top-k accuracy
-            exact (bool) : whether to return aggregate statistics (if
-                False) or per-example correctness (if True)
+    Args:
+        output (ch.tensor) : model output (N, classes) or (N, attributes)
+            for sigmoid/multitask binary classification
+        target (ch.tensor) : correct labels (N,) [multiclass] or (N,
+            attributes) [multitask binary]
+        topk (tuple) : for each item "k" in this tuple, this method
+            will return the top-k accuracy
+        exact (bool) : whether to return aggregate statistics (if
+            False) or per-example correctness (if True)
 
-        Returns:
-            A list of top-k accuracies.
+    Returns:
+        A list of top-k accuracies.
     """
     with ch.no_grad():
         # Binary Classification
         if len(target.shape) > 1:
-            assert output.shape == target.shape, \
+            assert output.shape == target.shape, (
                 "Detected binary classification but output shape != target shape"
-            return [ch.round(ch.sigmoid(output)).eq(ch.round(target)).float().mean()], [-1.0] 
+            )
+            return [ch.round(ch.sigmoid(output)).eq(ch.round(target)).float().mean()], [
+                -1.0
+            ]
 
         maxk = max(topk)
         batch_size = target.size(0)
@@ -84,11 +93,13 @@ def accuracy(output, target, topk=(1,), exact=False):
         else:
             return res_exact
 
+
 class InputNormalize(ch.nn.Module):
-    '''
-    A module (custom layer) for normalizing the input to have a fixed 
+    """
+    A module (custom layer) for normalizing the input to have a fixed
     mean and standard deviation (user-specified).
-    '''
+    """
+
     def __init__(self, new_mean, new_std):
         super(InputNormalize, self).__init__()
         new_std = new_std[..., None, None]
@@ -99,14 +110,19 @@ class InputNormalize(ch.nn.Module):
 
     def forward(self, x):
         x = ch.clamp(x, 0, 1)
-        x_normalized = (x - self.new_mean)/self.new_std
+        x_normalized = (x - self.new_mean) / self.new_std
         return x_normalized
 
-class DataPrefetcher():
+
+class DataPrefetcher:
     def __init__(self, loader, stop_after=None):
         self.loader = loader
         self.dataset = loader.dataset
-        self.device = "cuda" if ch.cuda.is_available() else ("mps" if ch.backends.mps.is_available() else "cpu")
+        self.device = (
+            "cuda"
+            if ch.cuda.is_available()
+            else ("mps" if ch.backends.mps.is_available() else "cpu")
+        )
         # self.stream = ch.cuda.Stream()
         self.stop_after = stop_after
         self.next_input = None
@@ -142,8 +158,10 @@ class DataPrefetcher():
             if type(self.stop_after) is int and (count > self.stop_after):
                 break
 
+
 class AverageMeter(object):
     """Computes and stores the average and current value"""
+
     def __init__(self):
         self.reset()
 
@@ -159,25 +177,27 @@ class AverageMeter(object):
         self.count += n
         self.avg = self.sum / self.count
 
+
 # ImageNet label mappings
 def get_label_mapping(dataset_name, ranges):
-    if dataset_name == 'imagenet':
+    if dataset_name == "imagenet":
         label_mapping = None
-    elif dataset_name == 'restricted_imagenet':
+    elif dataset_name == "restricted_imagenet":
+
         def label_mapping(classes, class_to_idx):
             return restricted_label_mapping(classes, class_to_idx, ranges=ranges)
-    elif dataset_name == 'custom_imagenet':
+    elif dataset_name == "custom_imagenet":
+
         def label_mapping(classes, class_to_idx):
             return custom_label_mapping(classes, class_to_idx, ranges=ranges)
     else:
-        raise ValueError('No such dataset_name %s' % dataset_name)
+        raise ValueError("No such dataset_name %s" % dataset_name)
 
     return label_mapping
 
+
 def restricted_label_mapping(classes, class_to_idx, ranges):
-    range_sets = [
-        set(range(s, e+1)) for s,e in ranges
-    ]
+    range_sets = [set(range(s, e + 1)) for s, e in ranges]
 
     # add wildcard
     # range_sets.append(set(range(0, 1002)))
@@ -190,8 +210,8 @@ def restricted_label_mapping(classes, class_to_idx, ranges):
     filtered_classes = list(mapping.keys()).sort()
     return filtered_classes, mapping
 
-def custom_label_mapping(classes, class_to_idx, ranges):
 
+def custom_label_mapping(classes, class_to_idx, ranges):
     mapping = {}
     for class_name, idx in class_to_idx.items():
         for new_idx, range_set in enumerate(ranges):

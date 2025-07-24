@@ -10,29 +10,55 @@ from torch.jit.annotations import List
 from ..tools.custom_modules import FakeReLU
 
 
-__all__ = ['DenseNet', 'densenet121', 'densenet169', 'densenet201', 'densenet161']
+__all__ = ["DenseNet", "densenet121", "densenet169", "densenet201", "densenet161"]
 
 model_urls = {
-    'densenet121': 'https://download.pytorch.org/models/densenet121-a639ec97.pth',
-    'densenet169': 'https://download.pytorch.org/models/densenet169-b2777c0a.pth',
-    'densenet201': 'https://download.pytorch.org/models/densenet201-c1103571.pth',
-    'densenet161': 'https://download.pytorch.org/models/densenet161-8d451a50.pth',
+    "densenet121": "https://download.pytorch.org/models/densenet121-a639ec97.pth",
+    "densenet169": "https://download.pytorch.org/models/densenet169-b2777c0a.pth",
+    "densenet201": "https://download.pytorch.org/models/densenet201-c1103571.pth",
+    "densenet161": "https://download.pytorch.org/models/densenet161-8d451a50.pth",
 }
 
 
 class _DenseLayer(nn.Module):
-    def __init__(self, num_input_features, growth_rate, bn_size, drop_rate, memory_efficient=False):
+    def __init__(
+        self,
+        num_input_features,
+        growth_rate,
+        bn_size,
+        drop_rate,
+        memory_efficient=False,
+    ):
         super(_DenseLayer, self).__init__()
-        self.add_module('norm1', nn.BatchNorm2d(num_input_features)),
-        self.add_module('relu1', nn.ReLU(inplace=True)),
-        self.add_module('conv1', nn.Conv2d(num_input_features, bn_size *
-                                           growth_rate, kernel_size=1, stride=1,
-                                           bias=False)),
-        self.add_module('norm2', nn.BatchNorm2d(bn_size * growth_rate)),
-        self.add_module('relu2', nn.ReLU(inplace=True)),
-        self.add_module('conv2', nn.Conv2d(bn_size * growth_rate, growth_rate,
-                                           kernel_size=3, stride=1, padding=1,
-                                           bias=False)),
+        (self.add_module("norm1", nn.BatchNorm2d(num_input_features)),)
+        (self.add_module("relu1", nn.ReLU(inplace=True)),)
+        (
+            self.add_module(
+                "conv1",
+                nn.Conv2d(
+                    num_input_features,
+                    bn_size * growth_rate,
+                    kernel_size=1,
+                    stride=1,
+                    bias=False,
+                ),
+            ),
+        )
+        (self.add_module("norm2", nn.BatchNorm2d(bn_size * growth_rate)),)
+        (self.add_module("relu2", nn.ReLU(inplace=True)),)
+        (
+            self.add_module(
+                "conv2",
+                nn.Conv2d(
+                    bn_size * growth_rate,
+                    growth_rate,
+                    kernel_size=3,
+                    stride=1,
+                    padding=1,
+                    bias=False,
+                ),
+            ),
+        )
         self.drop_rate = float(drop_rate)
         self.memory_efficient = memory_efficient
 
@@ -86,15 +112,24 @@ class _DenseLayer(nn.Module):
 
         new_features = self.conv2(self.relu2(self.norm2(bottleneck_output)))
         if self.drop_rate > 0:
-            new_features = F.dropout(new_features, p=self.drop_rate,
-                                     training=self.training)
+            new_features = F.dropout(
+                new_features, p=self.drop_rate, training=self.training
+            )
         return new_features
 
 
 class _DenseBlock(nn.ModuleDict):
     _version = 2
 
-    def __init__(self, num_layers, num_input_features, bn_size, growth_rate, drop_rate, memory_efficient=False):
+    def __init__(
+        self,
+        num_layers,
+        num_input_features,
+        bn_size,
+        growth_rate,
+        drop_rate,
+        memory_efficient=False,
+    ):
         super(_DenseBlock, self).__init__()
         for i in range(num_layers):
             layer = _DenseLayer(
@@ -104,7 +139,7 @@ class _DenseBlock(nn.ModuleDict):
                 drop_rate=drop_rate,
                 memory_efficient=memory_efficient,
             )
-            self.add_module('denselayer%d' % (i + 1), layer)
+            self.add_module("denselayer%d" % (i + 1), layer)
 
     def forward(self, init_features):
         features = [init_features]
@@ -117,11 +152,19 @@ class _DenseBlock(nn.ModuleDict):
 class _Transition(nn.Sequential):
     def __init__(self, num_input_features, num_output_features):
         super(_Transition, self).__init__()
-        self.add_module('norm', nn.BatchNorm2d(num_input_features))
-        self.add_module('relu', nn.ReLU(inplace=True))
-        self.add_module('conv', nn.Conv2d(num_input_features, num_output_features,
-                                          kernel_size=1, stride=1, bias=False))
-        self.add_module('pool', nn.AvgPool2d(kernel_size=2, stride=2))
+        self.add_module("norm", nn.BatchNorm2d(num_input_features))
+        self.add_module("relu", nn.ReLU(inplace=True))
+        self.add_module(
+            "conv",
+            nn.Conv2d(
+                num_input_features,
+                num_output_features,
+                kernel_size=1,
+                stride=1,
+                bias=False,
+            ),
+        )
+        self.add_module("pool", nn.AvgPool2d(kernel_size=2, stride=2))
 
 
 class DenseNet(nn.Module):
@@ -140,21 +183,41 @@ class DenseNet(nn.Module):
           but slower. Default: *False*. See `"paper" <https://arxiv.org/pdf/1707.06990.pdf>`_
     """
 
-    __constants__ = ['features']
+    __constants__ = ["features"]
 
-    def __init__(self, growth_rate=32, block_config=(6, 12, 24, 16),
-                 num_init_features=64, bn_size=4, drop_rate=0, num_classes=1000, memory_efficient=False):
-
+    def __init__(
+        self,
+        growth_rate=32,
+        block_config=(6, 12, 24, 16),
+        num_init_features=64,
+        bn_size=4,
+        drop_rate=0,
+        num_classes=1000,
+        memory_efficient=False,
+    ):
         super(DenseNet, self).__init__()
 
         # First convolution
-        self.features = nn.Sequential(OrderedDict([
-            ('conv0', nn.Conv2d(3, num_init_features, kernel_size=7, stride=2,
-                                padding=3, bias=False)),
-            ('norm0', nn.BatchNorm2d(num_init_features)),
-            ('relu0', nn.ReLU(inplace=True)),
-            ('pool0', nn.MaxPool2d(kernel_size=3, stride=2, padding=1)),
-        ]))
+        self.features = nn.Sequential(
+            OrderedDict(
+                [
+                    (
+                        "conv0",
+                        nn.Conv2d(
+                            3,
+                            num_init_features,
+                            kernel_size=7,
+                            stride=2,
+                            padding=3,
+                            bias=False,
+                        ),
+                    ),
+                    ("norm0", nn.BatchNorm2d(num_init_features)),
+                    ("relu0", nn.ReLU(inplace=True)),
+                    ("pool0", nn.MaxPool2d(kernel_size=3, stride=2, padding=1)),
+                ]
+            )
+        )
 
         # Each denseblock
         num_features = num_init_features
@@ -165,18 +228,20 @@ class DenseNet(nn.Module):
                 bn_size=bn_size,
                 growth_rate=growth_rate,
                 drop_rate=drop_rate,
-                memory_efficient=memory_efficient
+                memory_efficient=memory_efficient,
             )
-            self.features.add_module('denseblock%d' % (i + 1), block)
+            self.features.add_module("denseblock%d" % (i + 1), block)
             num_features = num_features + num_layers * growth_rate
             if i != len(block_config) - 1:
-                trans = _Transition(num_input_features=num_features,
-                                    num_output_features=num_features // 2)
-                self.features.add_module('transition%d' % (i + 1), trans)
+                trans = _Transition(
+                    num_input_features=num_features,
+                    num_output_features=num_features // 2,
+                )
+                self.features.add_module("transition%d" % (i + 1), trans)
                 num_features = num_features // 2
 
         # Final batch norm
-        self.features.add_module('norm5', nn.BatchNorm2d(num_features))
+        self.features.add_module("norm5", nn.BatchNorm2d(num_features))
 
         # Linear layer
         self.classifier = nn.Linear(num_features, num_classes)
@@ -192,8 +257,9 @@ class DenseNet(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x, with_latent=False, fake_relu=False, no_relu=False):
-        assert not no_relu, \
+        assert not no_relu, (
             "DenseNet has no pre-ReLU activations, no_relu not supported"
+        )
         features = self.features(x)
         if fake_relu:
             out = FakeReLU.apply(features)
@@ -208,13 +274,15 @@ class DenseNet(nn.Module):
         else:
             return out
 
+
 def _load_state_dict(model, model_url, progress):
     # '.'s are no longer allowed in module names, but previous _DenseLayer
     # has keys 'norm.1', 'relu.1', 'conv.1', 'norm.2', 'relu.2', 'conv.2'.
     # They are also in the checkpoints in model_urls. This pattern is used
     # to find such keys.
     pattern = re.compile(
-        r'^(.*denselayer\d+\.(?:norm|relu|conv))\.((?:[12])\.(?:weight|bias|running_mean|running_var))$')
+        r"^(.*denselayer\d+\.(?:norm|relu|conv))\.((?:[12])\.(?:weight|bias|running_mean|running_var))$"
+    )
 
     state_dict = load_state_dict_from_url(model_url, progress=progress)
     for key in list(state_dict.keys()):
@@ -226,8 +294,9 @@ def _load_state_dict(model, model_url, progress):
     model.load_state_dict(state_dict)
 
 
-def _densenet(arch, growth_rate, block_config, num_init_features, pretrained, progress,
-              **kwargs):
+def _densenet(
+    arch, growth_rate, block_config, num_init_features, pretrained, progress, **kwargs
+):
     model = DenseNet(growth_rate, block_config, num_init_features, **kwargs)
     if pretrained:
         _load_state_dict(model, model_urls[arch], progress)
@@ -244,9 +313,9 @@ def densenet121(pretrained=False, progress=True, **kwargs):
         memory_efficient (bool) - If True, uses checkpointing. Much more memory efficient,
           but slower. Default: *False*. See `"paper" <https://arxiv.org/pdf/1707.06990.pdf>`_
     """
-    return _densenet('densenet121', 32, (6, 12, 24, 16), 64, pretrained, progress,
-                     **kwargs)
-
+    return _densenet(
+        "densenet121", 32, (6, 12, 24, 16), 64, pretrained, progress, **kwargs
+    )
 
 
 def densenet161(pretrained=False, progress=True, **kwargs):
@@ -259,9 +328,9 @@ def densenet161(pretrained=False, progress=True, **kwargs):
         memory_efficient (bool) - If True, uses checkpointing. Much more memory efficient,
           but slower. Default: *False*. See `"paper" <https://arxiv.org/pdf/1707.06990.pdf>`_
     """
-    return _densenet('densenet161', 48, (6, 12, 36, 24), 96, pretrained, progress,
-                     **kwargs)
-
+    return _densenet(
+        "densenet161", 48, (6, 12, 36, 24), 96, pretrained, progress, **kwargs
+    )
 
 
 def densenet169(pretrained=False, progress=True, **kwargs):
@@ -274,9 +343,9 @@ def densenet169(pretrained=False, progress=True, **kwargs):
         memory_efficient (bool) - If True, uses checkpointing. Much more memory efficient,
           but slower. Default: *False*. See `"paper" <https://arxiv.org/pdf/1707.06990.pdf>`_
     """
-    return _densenet('densenet169', 32, (6, 12, 32, 32), 64, pretrained, progress,
-                     **kwargs)
-
+    return _densenet(
+        "densenet169", 32, (6, 12, 32, 32), 64, pretrained, progress, **kwargs
+    )
 
 
 def densenet201(pretrained=False, progress=True, **kwargs):
@@ -289,5 +358,6 @@ def densenet201(pretrained=False, progress=True, **kwargs):
         memory_efficient (bool) - If True, uses checkpointing. Much more memory efficient,
           but slower. Default: *False*. See `"paper" <https://arxiv.org/pdf/1707.06990.pdf>`_
     """
-    return _densenet('densenet201', 32, (6, 12, 48, 32), 64, pretrained, progress,
-                     **kwargs)
+    return _densenet(
+        "densenet201", 32, (6, 12, 48, 32), 64, pretrained, progress, **kwargs
+    )
