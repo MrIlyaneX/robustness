@@ -87,6 +87,21 @@ TRAINING_ARGS = [
     ],
     ["adv-train", [0, 1], "whether to train adversarially", REQ],
     ["adv-eval", [0, 1], "whether to adversarially evaluate", None],
+    # FOR NEW LOSS
+    [
+        "loss-type", 
+        ["ce", "margin_barrier"], 
+        "Type of loss function to use: 'ce' for CrossEntropyLoss, 'margin_barrier' for margin barrier loss", 
+        "ce"
+    ],
+    ["num-classes", int, "Number of classes in the dataset", 10],
+    ["delta", float, "Margin parameter for the margin barrier loss.", 0.5],
+    ["gamma", float, "Maximum allowed spectral norm for layers.", 6.0],
+    ["mu", float, "Initial strength (weight) of the margin barrier loss.", 0.01],
+    ["mu-lip", float, "Initial strength (weight) of the Lipschitz barrier loss.", 0.01],
+    ["eta", float, "Learning rate for the dual variable update (lambda).", 0.01],
+    ["warmup-epochs", int, "Number of epochs to train only with CE loss before activating barrier losses.", 0],
+    # END NEW PARAMS
     ["log-iters", int, "how frequently (in epochs) to log", 5],
     [
         "save-ckpt-iters",

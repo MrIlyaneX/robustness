@@ -15,7 +15,8 @@ import cox.store
 try:
     from .model_utils import make_and_restore_model
     from .datasets import DATASETS
-    from .train import train_model, eval_model
+    from .train import train_model as train_standard_model, eval_model as eval_standard_model
+    from .barrier_train import train_model as train_barrier_model, eval_model as eval_barrier_model
     from .tools import constants, helpers
     from . import defaults, __version__
     from .defaults import check_and_fill_args
@@ -56,11 +57,22 @@ def main(args, store=None):
 
     print(args)
     if args.eval_only:
-        return eval_model(args, model, val_loader, store=store)
+        if args.loss_type == "margin_barrier":
+            return eval_barrier_model(args, model, val_loader, store=store)
+        else: # Default or 'ce'
+            return eval_standard_model(args, model, val_loader, store=store)
 
     if not args.resume_optimizer:
         checkpoint = None
-    model = train_model(args, model, loaders, store=store, checkpoint=checkpoint)
+
+    if args.loss_type == "margin_barrier":
+        print(f"Using barrier training with loss type: {args.loss_type}")
+        model = train_barrier_model(args, model, loaders, store=store, checkpoint=checkpoint)
+    else: # Default to 'ce' or any other standard training
+        print(f"Using standard training with loss type: {args.loss_type}")
+        model = train_standard_model(args, model, loaders, store=store, checkpoint=checkpoint)
+        
+    return model
     return model
 
 
@@ -120,6 +132,7 @@ if __name__ == "__main__":
     args = cox.utils.Parameters(args.__dict__)
 
     args = setup_args(args)
-    store = setup_store_with_metadata(args)
+    # store = setup_store_with_metadata(args)
+    store = None
 
     final_model = main(args, store=store)
