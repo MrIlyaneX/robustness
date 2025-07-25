@@ -432,7 +432,7 @@ def train_model(
     # Initialize mu, mu_lip, lambda_dual for the training loop
     current_mu = args.mu
     current_mu_lip = args.mu_lip
-    lambda_dual = ch.tensor(0.0).to(device=device)
+    lambda_dual = ch.tensor([0.0]).to(device=device)
 
     for epoch in range(start_epoch, args.epochs):
         is_warmup_phase = epoch < args.warmup_epochs
@@ -703,7 +703,7 @@ def _model_loop(
             # Lipschitz Barrier Loss
             num_spectral_norm_layers = 0
             current_lip_bar_sum = ch.tensor(0.0, device=device)
-            for m in model.module.modules():
+            for m in model.modules():
                 spectral_norm_val = get_spectral_norm(m)
                 if spectral_norm_val is not None:
                     num_spectral_norm_layers += 1
@@ -801,8 +801,6 @@ def _model_loop(
 
         iterator.set_description(desc)
         iterator.refresh()
-    
-        break
 
     if writer is not None:
         prec_type = "adv" if adv else "nat"
