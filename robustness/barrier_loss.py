@@ -31,6 +31,6 @@ def logarithmic_barrier_loss(logits, labels, delta, mu):
         g_theta (torch.Tensor): The margin values.
     '''
     g_theta = per_sample_margin_loss(logits, labels, delta)
-    barrier_loss = -mu * torch.log(-g_theta + 1e-6).mean()
+    barrier_loss = -mu * torch.log(torch.clamp(-g_theta, min=1e-6)).mean()
     
     return barrier_loss, g_theta.detach()
