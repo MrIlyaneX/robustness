@@ -15,6 +15,7 @@ import warnings
 
 from .cifar_models.resnet import get_spectral_norm
 from .barrier_loss import logarithmic_barrier_loss, per_sample_margin_loss
+from .tools.buffered_logger import BufferedLogger
 
 if int(os.environ.get("NOTEBOOK_MODE", 0)) == 1:
     from tqdm import tqdm_notebook as tqdm
@@ -84,6 +85,27 @@ def check_required_args(args, eval_only=False):
             "Cannot use custom train loss \
             without a custom adversarial loss (see docs)"
         )
+
+def calculate_barrier_losses(model, model_logits, target, args, current_mu, current_mu_lip, device):
+    """Calculate margin and Lipschitz barrier losses."""
+    loss_bar, current_margins = logarithmic_barrier_loss(
+        model_logits, target, args.delta, current_mu
+    )
+    
+    # Lipschitz Barrier Loss
+    num_spectral_norm_layers = 0
+    current_lip_bar_sum = ch.tensor(0.0, device=device)
+    
+    for m in model.modules():
+        spectral_norm_val = get_spectral_norm(m)
+        if spectral_norm_val is not None:
+            num_spectral_norm_layers += 1
+            log_arg_lip = ch.clamp_min(args.gamma - spectral_norm_val + 1e-6, 1e-8)
+            current_lip_bar_sum += -current_mu_lip * ch.log(log_arg_lip)
+
+    lip_bar = current_lip_bar_sum / max(num_spectral_norm_layers, 1)
+    
+    return loss_bar, lip_bar, current_margins
 
 
 def make_optimizer_and_schedule(args, model, checkpoint, params):
@@ -376,6 +398,7 @@ def train_model(
 
     # Logging setup
     writer = store.tensorboard if store else None
+    logger = BufferedLogger(os.path.join(args.out_dir, 'progress_logs'))
     prec1_key = f"{'adv' if args.adv_train else 'nat'}_prec1"
     if store is not None:
         store.add_table(consts.LOGS_TABLE, consts.LOGS_SCHEMA)
@@ -463,6 +486,7 @@ def train_model(
             current_mu_lip=epoch_mu_lip,
             lambda_dual=lambda_dual,
             is_warmup_phase=is_warmup_phase,
+            logger=logger  # Add this parameter
         )
         lambda_dual = updated_lambda_dual
 
@@ -582,6 +606,7 @@ def _model_loop(
     current_mu_lip,
     lambda_dual,
     is_warmup_phase=False,
+    logger=None  # Add this parameter
 ):
     """
     *Internal function* (refer to the train_model and eval_model functions for
@@ -659,7 +684,12 @@ def _model_loop(
             "use_best": bool(args.use_best),
         }
 
-    iterator = tqdm(enumerate(loader), total=len(loader))
+    iterator = tqdm(
+        enumerate(loader), 
+        total=len(loader),
+        bar_format='{l_bar}{bar:30}{r_bar}',
+        leave=False
+    )
     device = (
         "cuda"
         if ch.cuda.is_available()
@@ -676,8 +706,7 @@ def _model_loop(
 
         # CE loss
         ce_loss = train_criterion(model_logits, target)
-        if len(ce_loss.shape) > 0:
-            ce_loss = ce_loss.mean()
+        ce_loss = ce_loss.mean() if len(ce_loss.shape) > 0 else ce_loss
 
         # Initialize barrier losses
         loss_bar = ch.tensor(0.0, device=device)
@@ -685,43 +714,17 @@ def _model_loop(
         current_margins = None
 
         if is_train and not is_warmup_phase:
-            loss_bar, current_margins = logarithmic_barrier_loss(
-                model_logits, target, args.delta, current_mu
+            loss_bar, lip_bar, current_margins = calculate_barrier_losses(
+                model, model_logits, target, args, current_mu, current_mu_lip, device
             )
             
-            # print(type(loss_bar), loss_bar)
-            # print(type(current_margins), current_margins)
-
-            margin_barrier_losses.update(loss_bar, inp.size(0))
-            avg_margins.update(
-                current_margins.mean(), inp.size(0)
-            )
+            margin_barrier_losses.update(loss_bar.item(), inp.size(0))
+            lip_barrier_losses.update(lip_bar.item(), inp.size(0))
+            if current_margins is not None:
+                avg_margins.update(current_margins.mean(), inp.size(0))
 
             if lambda_dual is not None and lambda_dual.shape[0] != inp.shape[0]:
                 lambda_dual = ch.zeros(inp.shape[0], device=device)
-
-            # Lipschitz Barrier Loss
-            num_spectral_norm_layers = 0
-            current_lip_bar_sum = ch.tensor(0.0, device=device)
-            for m in model.modules():
-                spectral_norm_val = get_spectral_norm(m)
-                if spectral_norm_val is not None:
-                    num_spectral_norm_layers += 1
-                    # Constraint is sigma_1(W_l) < gamma. So, gamma - sigma_1(W_l) > 0.
-                    log_arg_lip = args.gamma - spectral_norm_val + 1e-6
-                    log_arg_lip = ch.clamp_min(
-                        log_arg_lip, 1e-8
-                    )
-                    current_lip_bar_sum += -current_mu_lip * ch.log(log_arg_lip)
-
-            if num_spectral_norm_layers > 0:
-                lip_bar = (
-                    current_lip_bar_sum / num_spectral_norm_layers
-                )
-                lip_barrier_losses.update(lip_bar.item(), inp.size(0))
-            else:
-                lip_bar = ch.tensor(0.0, device=device)
-
 
         # Total Loss
         loss = ce_loss + loss_bar + lip_bar
@@ -775,46 +778,49 @@ def _model_loop(
             writer.add_image("Nat input", nat_grid, epoch)
             writer.add_image("Adv input", adv_grid, epoch)
 
-        desc = (
-            f"{loop_msg} Epoch:{epoch} | Loss {losses.avg:.4f} | "
-            f"{prec}1 {top1_acc:.3f} | {prec}5 {top5_acc:.3f} | "
-            f"Reg term: {reg_term:.4f}"
-        )
+        # Update the description for the progress bar
+        desc = f"{loop_msg} E{epoch:>3d}"
+        base_stats = {
+            "Loss": f"{losses.avg:.3f}",
+            "CE": f"{ce_loss.item():.3f}",
+            f"{prec}1": f"{top1_acc:.3f}"
+        }
 
         if not is_warmup_phase and is_train:
-            desc += f" | MgnBar {margin_barrier_losses.avg:.4f} | LipBar {lip_barrier_losses.avg:.4f}"
-            if avg_margins.count > 0: 
-                desc += f" | AvgMgn {avg_margins.avg:.4f}"
+            barrier_stats = {
+                "MgnB": f"{margin_barrier_losses.avg:.3f}",
+                "LipB": f"{lip_barrier_losses.avg:.3f}"
+            }
+            if avg_margins.count > 0:
+                barrier_stats["Mgn"] = f"{avg_margins.avg:.3f}"
+            base_stats.update(barrier_stats)
 
-        desc += " ||"
+        stats_str = " | ".join(f"{k} {v}" for k, v in base_stats.items())
+        desc = f"{desc} | {stats_str}"
 
-        # USER-DEFINED HOOK
-        if has_attr(args, "iteration_hook"):
-            args.iteration_hook(model, i, loop_type, inp, target)
-
+        if logger:
+            logger.log(desc)
         iterator.set_description(desc)
-        iterator.refresh()
+        
+    # At the end of _model_loop, flush the buffer:
+    if logger:
+        logger.flush()
 
     if writer is not None:
         prec_type = "adv" if adv else "nat"
-        descs = ["loss", "top1", "top5"]
-        vals = [losses, top1, top5]
-        for d, v in zip(descs, vals):
-            writer.add_scalar("_".join([prec_type, loop_type, d]), v.avg, epoch)
-
+        metrics = {
+            f"{prec_type}_{loop_type}_loss": losses.avg,
+            f"{prec_type}_{loop_type}_top1": top1.avg,
+        }
+        
         if is_train and not is_warmup_phase:
-            writer.add_scalar(
-                f"{prec_type}/{loop_type}/margin_barrier_loss",
-                margin_barrier_losses.avg,
-                epoch,
-            )
-            writer.add_scalar(
-                f"{prec_type}/{loop_type}/lip_barrier_loss",
-                lip_barrier_losses.avg,
-                epoch,
-            )
-            writer.add_scalar(
-                f"{prec_type}/{loop_type}/average_margin", avg_margins.avg, epoch
-            )
+            metrics.update({
+                f"{prec_type}/{loop_type}/margin_barrier_loss": margin_barrier_losses.avg,
+                f"{prec_type}/{loop_type}/lip_barrier_loss": lip_barrier_losses.avg,
+                f"{prec_type}/{loop_type}/average_margin": avg_margins.avg
+            })
+            
+        for name, value in metrics.items():
+            writer.add_scalar(name, value, epoch)
 
     return top1.avg, losses.avg, lambda_dual, avg_margins.avg

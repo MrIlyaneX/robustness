@@ -96,7 +96,7 @@ TRAINING_ARGS = [
     ],
     ["num-classes", int, "Number of classes in the dataset", 10],
     ["delta", float, "Margin parameter for the margin barrier loss.", 0.5],
-    ["gamma", float, "Maximum allowed spectral norm for layers.", 6.0],
+    ["gamma", float, "Maximum allowed spectral norm for layers.", 1.5],
     ["mu", float, "Initial strength (weight) of the margin barrier loss.", 0.01],
     ["mu-lip", float, "Initial strength (weight) of the Lipschitz barrier loss.", 0.01],
     ["eta", float, "Learning rate for the dual variable update (lambda).", 0.01],
