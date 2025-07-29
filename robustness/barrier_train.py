@@ -672,7 +672,7 @@ def _model_loop(
         output, final_inp = model(inp, target=target, make_adv=adv, **attack_kwargs)
 
         model_logits = output[0] if (type(output) is tuple) else output
-        print(type(model_logits))
+        # print(type(model_logits))
 
         # CE loss
         ce_loss = train_criterion(model_logits, target)
@@ -689,8 +689,8 @@ def _model_loop(
                 model_logits, target, args.delta, current_mu
             )
             
-            print(type(loss_bar), loss_bar)
-            print(type(current_margins), current_margins)
+            # print(type(loss_bar), loss_bar)
+            # print(type(current_margins), current_margins)
 
             margin_barrier_losses.update(loss_bar, inp.size(0))
             avg_margins.update(
@@ -776,23 +776,16 @@ def _model_loop(
             writer.add_image("Adv input", adv_grid, epoch)
 
         desc = (
-            "{2} Epoch:{0} | Loss {loss.avg:.4f} | "
-            "{1}1 {top1_acc:.3f} | {1}5 {top5_acc:.3f} | "
-            "Reg term: {reg:.4f}".format(
-                epoch,
-                prec,
-                loop_msg,
-                loss=losses,
-                top1_acc=top1_acc,
-                top5_acc=top5_acc,
-                reg=reg_term,
-            )
+            f"{loop_msg} Epoch:{epoch} | Loss {losses.avg:.4f} | "
+            f"{prec}1 {top1_acc:.3f} | {prec}5 {top5_acc:.3f} | "
+            f"Reg term: {reg_term:.4f}"
         )
 
         if not is_warmup_phase and is_train:
             desc += f" | MgnBar {margin_barrier_losses.avg:.4f} | LipBar {lip_barrier_losses.avg:.4f}"
-            if avg_margins.count > 0:
+            if avg_margins.count > 0: 
                 desc += f" | AvgMgn {avg_margins.avg:.4f}"
+
         desc += " ||"
 
         # USER-DEFINED HOOK
