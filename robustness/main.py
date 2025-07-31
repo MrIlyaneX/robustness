@@ -3,23 +3,28 @@ The main file, which exposes the robustness command-line tool, detailed in
 :doc:`this walkthrough <../example_usage/cli_usage>`.
 """
 
-from argparse import ArgumentParser
 import os
-import git
-import torch as ch
+from argparse import ArgumentParser
 
 import cox
-import cox.utils
 import cox.store
+import cox.utils
+import git
+import torch as ch
+from dotenv import load_dotenv
+
+import wandb
 
 try:
-    from .model_utils import make_and_restore_model
+    from . import __version__, defaults
+    from .barrier_train import eval_model as eval_barrier_model
+    from .barrier_train import train_model as train_barrier_model
     from .datasets import DATASETS
-    from .train import train_model as train_standard_model, eval_model as eval_standard_model
-    from .barrier_train import train_model as train_barrier_model, eval_model as eval_barrier_model
-    from .tools import constants, helpers
-    from . import defaults, __version__
     from .defaults import check_and_fill_args
+    from .model_utils import make_and_restore_model
+    from .tools import constants, helpers
+    from .train import eval_model as eval_standard_model
+    from .train import train_model as train_standard_model
 except:
     raise ValueError("Make sure to run with python -m (see README.md)")
 
@@ -36,22 +41,21 @@ def main(args, store=None):
     trains as a model. Check out the argparse object in this file for
     argument options.
     """
-    # MAKE DATASET AND LOADERS
+    load_dotenv()
+
+    wandb_run = wandb.init(project="robustness_barrier_training", config=args.__dict__)
+
     data_path = os.path.expandvars(args.data)
     dataset = DATASETS[args.dataset](data_path)
 
-    train_loader, val_loader = dataset.make_loaders(
-        args.workers, args.batch_size, data_aug=bool(args.data_aug)
-    )
+    train_loader, val_loader = dataset.make_loaders(args.workers, args.batch_size, data_aug=bool(args.data_aug))
 
     train_loader = helpers.DataPrefetcher(train_loader)
     val_loader = helpers.DataPrefetcher(val_loader)
     loaders = (train_loader, val_loader)
 
     # MAKE MODEL
-    model, checkpoint = make_and_restore_model(
-        arch=args.arch, dataset=dataset, resume_path=args.resume
-    )
+    model, checkpoint = make_and_restore_model(arch=args.arch, dataset=dataset, resume_path=args.resume)
     if "module" in dir(model):
         model = model.module
 
@@ -59,7 +63,7 @@ def main(args, store=None):
     if args.eval_only:
         if args.loss_type == "margin_barrier":
             return eval_barrier_model(args, model, val_loader, store=store)
-        else: # Default or 'ce'
+        else:  # Default or 'ce'
             return eval_standard_model(args, model, val_loader, store=store)
 
     if not args.resume_optimizer:
@@ -67,12 +71,12 @@ def main(args, store=None):
 
     if args.loss_type == "margin_barrier":
         print(f"Using barrier training with loss type: {args.loss_type}")
-        model = train_barrier_model(args, model, loaders, store=store, checkpoint=checkpoint)
-    else: # Default to 'ce' or any other standard training
+        model = train_barrier_model(args, model, loaders, store=store, checkpoint=checkpoint, wandb_run=wandb_run)
+    else:  # Default to 'ce' or any other standard training
         print(f"Using standard training with loss type: {args.loss_type}")
         model = train_standard_model(args, model, loaders, store=store, checkpoint=checkpoint)
-        
-    return model
+
+    wandb.finish()
     return model
 
 

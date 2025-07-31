@@ -1,21 +1,22 @@
-import torch as ch
-import numpy as np
-import torch.nn as nn
-from torch.optim import SGD, lr_scheduler
-from torchvision.utils import make_grid
-from cox.utils import Parameters
-
-from .tools import helpers
-from .tools.helpers import AverageMeter, ckpt_at_epoch, has_attr
-from .tools import constants as consts
-import dill
 import os
 import time
 import warnings
 
-from .cifar_models.resnet import get_spectral_norm
+import dill
+import numpy as np
+import torch as ch
+import torch.nn as nn
+import wandb
+from cox.utils import Parameters
+from torch.optim import SGD, lr_scheduler
+from torchvision.utils import make_grid
+
 from .barrier_loss import logarithmic_barrier_loss, per_sample_margin_loss
+from .cifar_models.resnet import get_spectral_norm
+from .tools import constants as consts
+from .tools import helpers
 from .tools.buffered_logger import BufferedLogger
+from .tools.helpers import AverageMeter, ckpt_at_epoch, has_attr
 
 if int(os.environ.get("NOTEBOOK_MODE", 0)) == 1:
     from tqdm import tqdm_notebook as tqdm
@@ -86,16 +87,15 @@ def check_required_args(args, eval_only=False):
             without a custom adversarial loss (see docs)"
         )
 
+
 def calculate_barrier_losses(model, model_logits, target, args, current_mu, current_mu_lip, device):
     """Calculate margin and Lipschitz barrier losses."""
-    loss_bar, current_margins = logarithmic_barrier_loss(
-        model_logits, target, args.delta, current_mu
-    )
-    
+    loss_bar, current_margins = logarithmic_barrier_loss(model_logits, target, args.delta, current_mu)
+
     # Lipschitz Barrier Loss
     num_spectral_norm_layers = 0
     current_lip_bar_sum = ch.tensor(0.0, device=device)
-    
+
     for m in model.modules():
         spectral_norm_val = get_spectral_norm(m)
         if spectral_norm_val is not None:
@@ -104,7 +104,7 @@ def calculate_barrier_losses(model, model_logits, target, args, current_mu, curr
             current_lip_bar_sum += -current_mu_lip * ch.log(log_arg_lip)
 
     lip_bar = current_lip_bar_sum / max(num_spectral_norm_layers, 1)
-    
+
     return loss_bar, lip_bar, current_margins
 
 
@@ -130,9 +130,7 @@ def make_optimizer_and_schedule(args, model, checkpoint, params):
     """
     # Make optimizer
     param_list = model.parameters() if params is None else params
-    optimizer = SGD(
-        param_list, args.lr, momentum=args.momentum, weight_decay=args.weight_decay
-    )
+    optimizer = SGD(param_list, args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
     if args.mixed_precision:
         model.to("cuda")
@@ -169,9 +167,7 @@ def make_optimizer_and_schedule(args, model, checkpoint, params):
 
         schedule = lr_scheduler.LambdaLR(optimizer, lr_func)
     elif args.step_lr:
-        schedule = lr_scheduler.StepLR(
-            optimizer, step_size=args.step_lr, gamma=args.step_lr_gamma
-        )
+        schedule = lr_scheduler.StepLR(optimizer, step_size=args.step_lr, gamma=args.step_lr_gamma)
 
     # Fast-forward the optimizer and the scheduler if resuming
     if checkpoint:
@@ -180,10 +176,7 @@ def make_optimizer_and_schedule(args, model, checkpoint, params):
             schedule.load_state_dict(checkpoint["schedule"])
         except:
             steps_to_take = checkpoint["epoch"]
-            print(
-                "Could not load schedule (was probably LambdaLR)."
-                f" Stepping {steps_to_take} times instead..."
-            )
+            print(f"Could not load schedule (was probably LambdaLR). Stepping {steps_to_take} times instead...")
             for i in range(steps_to_take):
                 schedule.step()
 
@@ -198,7 +191,7 @@ def make_optimizer_and_schedule(args, model, checkpoint, params):
     return optimizer, schedule
 
 
-def eval_model(args, model, loader, store):
+def eval_model(args, model, loader, store, wandb_run=None):
     """
     Evaluate a model for standard (and optionally adversarial) accuracy.
 
@@ -221,6 +214,8 @@ def eval_model(args, model, loader, store):
     assert not hasattr(model, "module"), "model is already in DataParallel."
     model = ch.nn.DataParallel(model)
 
+    eval_global_step = 0
+
     prec1, nat_loss, _, _ = _model_loop(
         args,
         "val",
@@ -233,14 +228,14 @@ def eval_model(args, model, loader, store):
         current_mu=0,
         current_mu_lip=0,
         lambda_dual=None,
+        wandb_run=wandb_run,
+        global_step=eval_global_step,
     )
 
     adv_prec1, adv_loss = float("nan"), float("nan")
     if args.adv_eval:
         args.eps = eval(str(args.eps)) if has_attr(args, "eps") else None
-        args.attack_lr = (
-            eval(str(args.attack_lr)) if has_attr(args, "attack_lr") else None
-        )
+        args.attack_lr = eval(str(args.attack_lr)) if has_attr(args, "attack_lr") else None
         adv_prec1, adv_loss, _, _ = _model_loop(
             args,
             "val",
@@ -253,6 +248,8 @@ def eval_model(args, model, loader, store):
             current_mu=0,
             current_mu_lip=0,
             lambda_dual=None,
+            wandb_run=wandb_run,
+            global_step=eval_global_step,
         )
     log_info = {
         "epoch": 0,
@@ -264,6 +261,19 @@ def eval_model(args, model, loader, store):
         "train_loss": float("nan"),
         "time": time.time() - start_time,
     }
+
+    if wandb_run:
+        wandb_run.log(
+            {
+                "eval/epoch": 0,
+                "eval/nat_prec1": prec1,
+                "eval/adv_prec1": adv_prec1,
+                "eval/nat_loss": nat_loss,
+                "eval/adv_loss": adv_loss,
+                "eval/time": time.time() - start_time,
+            },
+            step=0,
+        )
 
     # Log info into the logs table
     if store:
@@ -281,6 +291,7 @@ def train_model(
     store=None,
     update_params=None,
     disable_no_grad=False,
+    wandb_run=None,
 ):
     """
     Main function for training a model.
@@ -393,12 +404,14 @@ def train_model(
             learning)
         disable_no_grad (bool) : if True, then even model evaluation will be
             run with autograd enabled (otherwise it will be wrapped in a ch.no_grad())
+
+        wandb_run (wandb.Run): Weights & Biases logger
     """
     print("Using Barrier Train Method")
 
     # Logging setup
     writer = store.tensorboard if store else None
-    logger = BufferedLogger(os.path.join(args.out_dir, 'progress_logs'))
+    logger = BufferedLogger(os.path.join(args.out_dir, "progress_logs"))
     prec1_key = f"{'adv' if args.adv_train else 'nat'}_prec1"
     if store is not None:
         store.add_table(consts.LOGS_TABLE, consts.LOGS_SCHEMA)
@@ -429,6 +442,8 @@ def train_model(
             device = "cpu"
 
     best_prec1, start_epoch = (0, 0)
+    global_step = 0
+
     if checkpoint:
         start_epoch = checkpoint["epoch"]
         best_prec1 = (
@@ -446,6 +461,8 @@ def train_model(
                 current_mu=0,  # Barrier not active during initial eval
                 current_mu_lip=0,
                 lambda_dual=None,
+                wandb_run=wandb_run,
+                global_step=global_step,
             )[0]
         )
 
@@ -460,20 +477,18 @@ def train_model(
     for epoch in range(start_epoch, args.epochs):
         is_warmup_phase = epoch < args.warmup_epochs
 
-        print(f"\n--- Epoch {epoch+1}/{args.epochs} ---")
+        print(f"\n--- Epoch {epoch + 1}/{args.epochs} ---")
         if is_warmup_phase:
             print(f"Warm-up Phase (Barrier Losses Inactive)")
             epoch_mu = 0.0
             epoch_mu_lip = 0.0
         else:
-            print(
-                f"Barrier Losses Active (mu: {current_mu:.6f}, mu_lip: {current_mu_lip:.6f})"
-            )
+            print(f"Barrier Losses Active (mu: {current_mu:.6f}, mu_lip: {current_mu_lip:.6f})")
             epoch_mu = current_mu
             epoch_mu_lip = current_mu_lip
 
         # train for one epoch
-        train_prec1, train_loss, updated_lambda_dual, _ = _model_loop(
+        train_prec1, train_loss, updated_lambda_dual, _, global_step = _model_loop(
             args,
             "train",
             train_loader,
@@ -486,7 +501,9 @@ def train_model(
             current_mu_lip=epoch_mu_lip,
             lambda_dual=lambda_dual,
             is_warmup_phase=is_warmup_phase,
-            logger=logger  # Add this parameter
+            logger=logger,
+            wandb_run=wandb_run,
+            global_step=global_step,
         )
         lambda_dual = updated_lambda_dual
 
@@ -502,12 +519,11 @@ def train_model(
             "mu": current_mu,
             "mu_lip": current_mu_lip,
             "lambda_dual": lambda_dual.cpu().numpy(),
+            "global_step": global_step,
         }
 
         def save_checkpoint(filename):
-            ckpt_save_path = os.path.join(
-                args.out_dir if not store else store.path, filename
-            )
+            ckpt_save_path = os.path.join(args.out_dir if not store else store.path, filename)
             ch.save(sd_info, ckpt_save_path, pickle_module=dill)
 
         save_its = args.save_ckpt_iters
@@ -518,7 +534,7 @@ def train_model(
             # log + get best
             ctx = ch.enable_grad() if disable_no_grad else ch.no_grad()
             with ctx:
-                prec1, nat_loss, _, _ = _model_loop(
+                prec1, nat_loss, _, _, _ = _model_loop(
                     args,
                     "val",
                     val_loader,
@@ -530,12 +546,14 @@ def train_model(
                     current_mu=0,
                     current_mu_lip=0,
                     lambda_dual=None,
+                    wandb_run=wandb_run,
+                    global_step=global_step,
                 )
 
             # loader, model, epoch, input_adv_exs
             should_adv_eval = args.adv_eval or args.adv_train
             if should_adv_eval:
-                adv_val_prec1, adv_val_loss, _, avg_margins = _model_loop(
+                adv_val_prec1, adv_val_loss, _, avg_margins, _ = _model_loop(
                     args,
                     "val",
                     val_loader,
@@ -548,6 +566,8 @@ def train_model(
                     current_mu_lip=0,
                     lambda_dual=None,
                     is_warmup_phase=True,
+                    wandb_run=wandb_run,
+                    global_step=global_step,
                 )
 
             # remember best prec@1 and save checkpoint
@@ -568,6 +588,27 @@ def train_model(
                 "train_loss": train_loss,
                 "time": time.time() - start_time,
             }
+
+            if wandb_run:
+                wandb_log_dict = {
+                    "epoch": epoch + 1,
+                    "train/loss": train_loss,
+                    "train/prec1": train_prec1,
+                    "val/nat_loss": nat_loss,
+                    "val/nat_prec1": prec1,
+                    "total_time": time.time() - start_time,
+                }
+                if should_adv_eval:
+                    wandb_log_dict.update(
+                        {
+                            "val/adv_loss": adv_val_loss,
+                            "val/adv_prec1": adv_val_prec1,
+                        }
+                    )
+                if not is_warmup_phase:
+                    wandb_log_dict["val/avg_margins"] = avg_margins
+
+                wandb_run.log(wandb_log_dict, step=global_step)
 
             # Log info into the logs table
             if store:
@@ -606,7 +647,9 @@ def _model_loop(
     current_mu_lip,
     lambda_dual,
     is_warmup_phase=False,
-    logger=None  # Add this parameter
+    logger=None,
+    wandb_run=None,
+    global_step: int = 0,
 ):
     """
     *Internal function* (refer to the train_model and eval_model functions for
@@ -629,6 +672,8 @@ def _model_loop(
         current_mu_lip (float): current strength of the Lipschitz barrier loss.
         lambda_dual (ch.Tensor): The dual variable tensor, updated in-place.
         is_warmup_phase (bool): True if currently in warm-up, False otherwise.
+
+        wandb_run (wandb.Run): Weights & Biases logger
 
     Returns:
         The average top1 accuracy and the average loss across the epoch,
@@ -655,18 +700,12 @@ def _model_loop(
 
     # If adv training (or evaling), set eps and random_restarts appropriately
     if adv:
-        eps = (
-            args.custom_eps_multiplier(epoch) * args.eps
-            if (is_train and args.custom_eps_multiplier)
-            else args.eps
-        )
+        eps = args.custom_eps_multiplier(epoch) * args.eps if (is_train and args.custom_eps_multiplier) else args.eps
         random_restarts = 0 if is_train else args.random_restarts
 
     # Custom training criterion
     has_custom_train_loss = has_attr(args, "custom_train_loss")
-    train_criterion = (
-        args.custom_train_loss if has_custom_train_loss else ch.nn.CrossEntropyLoss()
-    )
+    train_criterion = args.custom_train_loss if has_custom_train_loss else ch.nn.CrossEntropyLoss()
 
     has_custom_adv_loss = has_attr(args, "custom_adv_loss")
     adv_criterion = args.custom_adv_loss if has_custom_adv_loss else None
@@ -684,18 +723,12 @@ def _model_loop(
             "use_best": bool(args.use_best),
         }
 
-    iterator = tqdm(
-        enumerate(loader), 
-        total=len(loader),
-        bar_format='{l_bar}{bar:30}{r_bar}',
-        leave=False
-    )
-    device = (
-        "cuda"
-        if ch.cuda.is_available()
-        else ("mps" if ch.backends.mps.is_available() else "cpu")
-    )
+    iterator = tqdm(enumerate(loader), total=len(loader), bar_format="{l_bar}{bar:30}{r_bar}", leave=False)
+    device = "cuda" if ch.cuda.is_available() else ("mps" if ch.backends.mps.is_available() else "cpu")
     for i, (inp, target) in iterator:
+        if is_train:
+            global_step += 1
+
         inp = inp.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
 
@@ -717,7 +750,7 @@ def _model_loop(
             loss_bar, lip_bar, current_margins = calculate_barrier_losses(
                 model, model_logits, target, args, current_mu, current_mu_lip, device
             )
-            
+
             margin_barrier_losses.update(loss_bar.item(), inp.size(0))
             lip_barrier_losses.update(lip_bar.item(), inp.size(0))
             if current_margins is not None:
@@ -767,9 +800,7 @@ def _model_loop(
 
             # Dual ascent update for Lambda
             if not is_warmup_phase and current_margins is not None:
-                lambda_dual = (
-                    lambda_dual + args.eta * current_margins.detach()
-                ).clamp_min_(0)
+                lambda_dual = (lambda_dual + args.eta * current_margins.detach()).clamp_min_(0)
 
         elif adv and i == 0 and writer:
             # add some examples to the tensorboard
@@ -780,17 +811,27 @@ def _model_loop(
 
         # Update the description for the progress bar
         desc = f"{loop_msg} E{epoch:>3d}"
-        base_stats = {
-            "Loss": f"{losses.avg:.3f}",
-            "CE": f"{ce_loss.item():.3f}",
-            f"{prec}1": f"{top1_acc:.3f}"
-        }
+        base_stats = {"Loss": f"{losses.avg:.3f}", "CE": f"{ce_loss.item():.3f}", f"{prec}1": f"{top1_acc:.3f}"}
+
+        if wandb_run and is_train:
+            iteration_log_dict = {
+                f"{loop_type}/iter_loss": loss.item(),
+                f"{loop_type}/iter_ce_loss": ce_loss.item(),
+                f"{loop_type}/iter_{prec.lower()}1": prec1,
+            }
+            if not is_warmup_phase:
+                iteration_log_dict.update(
+                    {
+                        f"{loop_type}/iter_margin_barrier_loss": loss_bar.item(),
+                        f"{loop_type}/iter_lip_barrier_loss": lip_bar.item(),
+                    }
+                )
+                if current_margins is not None:
+                    iteration_log_dict[f"{loop_type}/iter_average_margin"] = current_margins.mean().item()
+            wandb_run.log(iteration_log_dict, step=global_step, commit=False)  # Commit False for iteration logs
 
         if not is_warmup_phase and is_train:
-            barrier_stats = {
-                "MgnB": f"{margin_barrier_losses.avg:.3f}",
-                "LipB": f"{lip_barrier_losses.avg:.3f}"
-            }
+            barrier_stats = {"MgnB": f"{margin_barrier_losses.avg:.3f}", "LipB": f"{lip_barrier_losses.avg:.3f}"}
             if avg_margins.count > 0:
                 barrier_stats["Mgn"] = f"{avg_margins.avg:.3f}"
             base_stats.update(barrier_stats)
@@ -801,7 +842,7 @@ def _model_loop(
         if logger:
             logger.log(desc)
         iterator.set_description(desc)
-        
+
     # At the end of _model_loop, flush the buffer:
     if logger:
         logger.flush()
@@ -812,15 +853,17 @@ def _model_loop(
             f"{prec_type}_{loop_type}_loss": losses.avg,
             f"{prec_type}_{loop_type}_top1": top1.avg,
         }
-        
+
         if is_train and not is_warmup_phase:
-            metrics.update({
-                f"{prec_type}/{loop_type}/margin_barrier_loss": margin_barrier_losses.avg,
-                f"{prec_type}/{loop_type}/lip_barrier_loss": lip_barrier_losses.avg,
-                f"{prec_type}/{loop_type}/average_margin": avg_margins.avg
-            })
-            
+            metrics.update(
+                {
+                    f"{prec_type}/{loop_type}/margin_barrier_loss": margin_barrier_losses.avg,
+                    f"{prec_type}/{loop_type}/lip_barrier_loss": lip_barrier_losses.avg,
+                    f"{prec_type}/{loop_type}/average_margin": avg_margins.avg,
+                }
+            )
+
         for name, value in metrics.items():
             writer.add_scalar(name, value, epoch)
 
-    return top1.avg, losses.avg, lambda_dual, avg_margins.avg
+    return top1.avg, losses.avg, lambda_dual, avg_margins.avg, global_step

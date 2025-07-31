@@ -46,6 +46,7 @@ dependencies = [
     "pyparsing==3.2.3",
     "pytest==8.4.1",
     "python-dateutil==2.9.0.post0",
+    "python-dotenv>=1.1.1",
     "pytz==2025.2",
     "requests==2.32.4",
     "scikit-learn==1.7.1",
@@ -64,5 +65,6 @@ dependencies = [
     "typing-extensions==4.14.1",
     "tzdata==2025.2",
     "urllib3==2.5.0",
+    "wandb>=0.21.0",
     "xmltodict==0.14.2",
 ]
