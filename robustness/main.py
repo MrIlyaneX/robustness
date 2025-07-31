@@ -43,7 +43,7 @@ def main(args, store=None):
     """
     load_dotenv()
 
-    wandb_run = wandb.init(project="robustness_barrier_training", config=args.__dict__)
+    wandb_run = wandb.init(project="robustness_barrier_training", config=args.__dict__, name=f"gamma_{args.gamma}-delta_{args.delta}")
 
     data_path = os.path.expandvars(args.data)
     dataset = DATASETS[args.dataset](data_path)
