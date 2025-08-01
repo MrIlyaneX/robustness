@@ -7,10 +7,7 @@ import os
 from argparse import ArgumentParser
 
 import cox
-import cox.store
 import cox.utils
-import git
-import torch as ch
 from dotenv import load_dotenv
 
 import wandb
@@ -36,14 +33,25 @@ parser = defaults.add_args_to_parser(defaults.TRAINING_ARGS, parser)
 parser = defaults.add_args_to_parser(defaults.PGD_ARGS, parser)
 
 
-def main(args, store=None):
+def main(args):
     """Given arguments from `setup_args` and a store from `setup_store`,
     trains as a model. Check out the argparse object in this file for
     argument options.
     """
     load_dotenv()
 
-    wandb_run = wandb.init(project="robustness_barrier_training", config=args.__dict__, name=f"gamma_{args.gamma}-delta_{args.delta}")
+    wandb_run = wandb.init(
+        project="robustness_barrier_training",
+        config=args.dict,
+        name=f"imp_gamma_{args.gamma}-delta_{args.delta}",
+    )
+
+    wandb.define_metric("epoch_val")
+    wandb.define_metric("epoch_train")
+    wandb.define_metric("iter_step")
+    wandb.define_metric("val/*", step_metric="epoch_val")
+    wandb.define_metric("train/epoch*", step_metric="epoch_train")
+    wandb.define_metric("train/iter*", step_metric="iter_step")
 
     data_path = os.path.expandvars(args.data)
     dataset = DATASETS[args.dataset](data_path)
@@ -62,19 +70,19 @@ def main(args, store=None):
     print(args)
     if args.eval_only:
         if args.loss_type == "margin_barrier":
-            return eval_barrier_model(args, model, val_loader, store=store)
+            return eval_barrier_model(args, model, val_loader)
         else:  # Default or 'ce'
-            return eval_standard_model(args, model, val_loader, store=store)
+            return eval_standard_model(args, model, val_loader, store=None)
 
     if not args.resume_optimizer:
         checkpoint = None
 
     if args.loss_type == "margin_barrier":
         print(f"Using barrier training with loss type: {args.loss_type}")
-        model = train_barrier_model(args, model, loaders, store=store, checkpoint=checkpoint, wandb_run=wandb_run)
+        model = train_barrier_model(args, model, loaders, checkpoint=checkpoint, wandb_run=wandb_run)
     else:  # Default to 'ce' or any other standard training
         print(f"Using standard training with loss type: {args.loss_type}")
-        model = train_standard_model(args, model, loaders, store=store, checkpoint=checkpoint)
+        model = train_standard_model(args, model, loaders, store=None, checkpoint=checkpoint)
 
     wandb.finish()
     return model
@@ -86,9 +94,6 @@ def setup_args(args):
     :mod:`robustness.defaults`, and also perform a sanity check to make sure no
     args are missing.
     """
-    # override non-None values with optional config_path
-    if args.config_path:
-        args = cox.utils.override_json(args, args.config_path)
 
     ds_class = DATASETS[args.dataset]
     args = check_and_fill_args(args, defaults.CONFIG_ARGS, ds_class)
@@ -105,38 +110,10 @@ def setup_args(args):
     return args
 
 
-def setup_store_with_metadata(args):
-    """
-    Sets up a store for training according to the arguments object. See the
-    argparse object above for options.
-    """
-    # Add git commit to args
-    try:
-        repo = git.Repo(
-            path=os.path.dirname(os.path.realpath(__file__)),
-            search_parent_directories=True,
-        )
-        version = repo.head.object.hexsha
-    except git.exc.InvalidGitRepositoryError:
-        version = __version__
-    args.version = version
-
-    # Create the store
-    store = cox.store.Store(args.out_dir, args.exp_name)
-    args_dict = args.__dict__
-    schema = cox.store.schema_from_dict(args_dict)
-    store.add_table("metadata", schema)
-    store["metadata"].append_row(args_dict)
-
-    return store
-
-
 if __name__ == "__main__":
     args = parser.parse_args()
     args = cox.utils.Parameters(args.__dict__)
 
     args = setup_args(args)
-    # store = setup_store_with_metadata(args)
-    store = None
 
-    final_model = main(args, store=store)
+    final_model = main(args)
