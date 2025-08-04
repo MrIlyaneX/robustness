@@ -92,7 +92,7 @@ def check_required_args(args: object, eval_only: bool = False) -> None:
         )
 
 
-def calculate_barrier_losses(model: ch.nn.Module, model_logits, target, args, current_mu: float, current_mu_lip: float):
+def calculate_barrier_losses(model: ch.nn.Module, model_logits, target, args, current_mu: float, current_mu_lip: float, gamma_violation_tracker: dict[str, int]):
     """Calculate margin and Lipschitz barrier losses."""
     global device
 
@@ -103,15 +103,27 @@ def calculate_barrier_losses(model: ch.nn.Module, model_logits, target, args, cu
     gamma_violations = 0
     current_lip_bar_sum = ch.tensor(0.0, device=device)
 
-    for m in model.modules():
+    layer_idx = 0
+    for m in enumerate(model.modules()):
         spectral_norm_val = get_spectral_norm(m)
         if spectral_norm_val is not None:
             num_spectral_norm_layers += 1
             log_arg_lip = ch.clamp_min(args.gamma - spectral_norm_val, 1e-8)
             current_lip_bar_sum += -current_mu_lip * ch.log(log_arg_lip)
 
+            layer_key = f"layer_{layer_idx}"
+
             if spectral_norm_val >= args.gamma:
+                # Violates the gamma constraint
+                gamma_violation_tracker[layer_key] = gamma_violation_tracker.get(layer_key, 0) + 1
+                consecutive_violations = gamma_violation_tracker[layer_key]
+                if consecutive_violations >= 3:
+                    warnings.warn(f"Warning: {layer_key} has violated gamma {consecutive_violations} times in a row (spectral_norm: {spectral_norm_val:.4f}, gamma: {args.gamma:.4f})")
                 gamma_violations += 1
+            else:
+                # No violations, reset counter
+                gamma_violation_tracker[layer_key] = 0
+            layer_idx += 1
 
     lip_bar = current_lip_bar_sum / max(num_spectral_norm_layers, 1)
 
@@ -322,6 +334,9 @@ def train_model(
     current_mu_lip = args.mu_lip
     lambda_dual = ch.tensor([0.0]).to(device=device)
 
+    # k:v is layer_{layer_idx}: violations in a row
+    gamma_violation_tracker = {}
+
     for epoch in range(start_epoch, args.epochs):
         is_warmup_phase = epoch < args.warmup_epochs
 
@@ -348,6 +363,7 @@ def train_model(
             current_mu_lip=current_mu_lip if not is_warmup_phase else 0,
             lambda_dual=lambda_dual,
             is_warmup_phase=is_warmup_phase,
+            gamma_violation_tracker=gamma_violation_tracker
         )
         lambda_dual = updated_lambda_dual
 
@@ -400,6 +416,7 @@ def train_model(
             "mu_lip": current_mu_lip,
             "lambda_dual": lambda_dual.cpu().numpy(),
             "iter_step": global_step,
+            "gamma_violation_tracker": gamma_violation_tracker,
             prec1_key: our_prec1,
         }
 
@@ -464,6 +481,7 @@ def _model_loop(
     current_mu_lip=0,
     lambda_dual=None,
     is_warmup_phase=False,
+    gamma_violation_tracker=None
 ):
     """
     *Internal function* (refer to the train_model and eval_model functions for
@@ -568,7 +586,7 @@ def _model_loop(
 
         if is_train and not is_warmup_phase:
             loss_bar, lip_bar, current_margins, gamma_violations = calculate_barrier_losses(
-                model, model_logits, target, args, current_mu, current_mu_lip
+                model, model_logits, target, args, current_mu, current_mu_lip, gamma_violation_tracker
             )
 
             margin_barrier_losses.update(loss_bar.item(), inp.size(0))
@@ -578,6 +596,12 @@ def _model_loop(
 
             if lambda_dual is not None and lambda_dual.shape[0] != inp.shape[0]:
                 lambda_dual = ch.zeros(inp.shape[0], device=device)
+        elif not is_train:
+            _, _, _, gamma_violations = calculate_barrier_losses(
+                model, model_logits, target, args, 0, 0, None
+            )
+
+        gamma_violation_meter.update(gamma_violations, 1)
 
         # Total Loss
         loss = ce_loss + loss_bar + lip_bar

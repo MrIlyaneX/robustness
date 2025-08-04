@@ -1,3 +1,7 @@
+wandb/
+best_results.txt
+grid_search_log.csv
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
