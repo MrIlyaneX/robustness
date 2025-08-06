@@ -25,6 +25,10 @@ except Exception as e:
     # warnings.warn("Could not import amp.")
     pass
 
+import math
+
+math.log(float(1e-6))
+
 global_step = 0
 
 device = "cpu"
@@ -92,7 +96,15 @@ def check_required_args(args: object, eval_only: bool = False) -> None:
         )
 
 
-def calculate_barrier_losses(model: ch.nn.Module, model_logits, target, args, current_mu: float, current_mu_lip: float, gamma_violation_tracker: dict[str, int]):
+def calculate_barrier_losses(
+    model: ch.nn.Module,
+    model_logits,
+    target,
+    args,
+    current_mu: float,
+    current_mu_lip: float,
+    gamma_violation_tracker: dict[str, int],
+):
     """Calculate margin and Lipschitz barrier losses."""
     global device
 
@@ -104,7 +116,7 @@ def calculate_barrier_losses(model: ch.nn.Module, model_logits, target, args, cu
     current_lip_bar_sum = ch.tensor(0.0, device=device)
 
     layer_idx = 0
-    for m in enumerate(model.modules()):
+    for idx, m in enumerate(model.modules()):
         spectral_norm_val = get_spectral_norm(m)
         if spectral_norm_val is not None:
             num_spectral_norm_layers += 1
@@ -118,7 +130,9 @@ def calculate_barrier_losses(model: ch.nn.Module, model_logits, target, args, cu
                 gamma_violation_tracker[layer_key] = gamma_violation_tracker.get(layer_key, 0) + 1
                 consecutive_violations = gamma_violation_tracker[layer_key]
                 if consecutive_violations >= 3:
-                    warnings.warn(f"Warning: {layer_key} has violated gamma {consecutive_violations} times in a row (spectral_norm: {spectral_norm_val:.4f}, gamma: {args.gamma:.4f})")
+                    warnings.warn(
+                        f"Warning: {layer_key} has violated gamma {consecutive_violations} times in a row (spectral_norm: {spectral_norm_val:.4f}, gamma: {args.gamma:.4f})"
+                    )
                 gamma_violations += 1
             else:
                 # No violations, reset counter
@@ -228,13 +242,15 @@ def eval_model(args: object, model: ch.nn.Module, loader: Iterable, wandb_run=No
 
     # Nat eval loop
     nat_prec1, nat_loss, nat_prec5, _, _, _, _ = _model_loop(
-        args,
-        "val",
-        loader,
-        model,
-        None,
-        0,
-        False,
+        args=args,
+        loop_type="val",
+        loader=loader,
+        model=model,
+        opt=None,
+        epoch=0,
+        adv=False,
+        current_mu=0,
+        lambda_dual=None,
     )
 
     adv_prec1, adv_loss, adv_prec5 = float("nan"), float("nan"), float("nan")
@@ -243,13 +259,15 @@ def eval_model(args: object, model: ch.nn.Module, loader: Iterable, wandb_run=No
         args.attack_lr = eval(str(args.attack_lr)) if has_attr(args, "attack_lr") else None
         # Adv eval loop
         adv_prec1, adv_loss, adv_prec5, _, _, _, _ = _model_loop(
-            args,
-            "val",
-            loader,
-            model,
-            None,
-            0,
-            True,
+            args=args,
+            loop_type="val",
+            loader=loader,
+            model=model,
+            opt=None,
+            epoch=0,
+            adv=True,
+            current_mu=0,
+            lambda_dual=None,
         )
 
     wandb_run.log(
@@ -316,13 +334,16 @@ def train_model(
             checkpoint[prec1_key]
             if prec1_key in checkpoint
             else _model_loop(
-                args,
-                "val",
-                val_loader,
-                model,
-                None,
-                start_epoch - 1,
-                args.adv_train,
+                args=args,
+                loop_type="val",
+                loader=val_loader,
+                model=model,
+                opt=None,
+                epoch=start_epoch - 1,
+                adv=args.adv_train,
+                current_mu=0,
+                current_mu_lip=0,
+                lambda_dual=None,
             )[0]
         )
 
@@ -352,18 +373,18 @@ def train_model(
             train_gamma_violation_avg,
             metrics_cache,
         ) = _model_loop(
-            args,
-            "train",
-            train_loader,
-            model,
-            opt,
-            epoch,
-            args.adv_train,
-            current_mu=current_mu if not is_warmup_phase else 0,
-            current_mu_lip=current_mu_lip if not is_warmup_phase else 0,
+            args=args,
+            loop_type="train",
+            loader=train_loader,
+            model=model,
+            opt=opt,
+            epoch=epoch,
+            adv=args.adv_train,
+            current_mu=current_mu,
+            current_mu_lip=current_mu_lip,
             lambda_dual=lambda_dual,
             is_warmup_phase=is_warmup_phase,
-            gamma_violation_tracker=gamma_violation_tracker
+            gamma_violation_tracker=gamma_violation_tracker,
         )
         lambda_dual = updated_lambda_dual
 
@@ -391,13 +412,18 @@ def train_model(
                 gamma_violation_avg,
                 _,
             ) = _model_loop(
-                args,
-                "val",
-                val_loader,
-                model,
-                None,
-                epoch,
-                True,
+                args=args,
+                loop_type="val",
+                loader=val_loader,
+                model=model,
+                opt=None,
+                epoch=epoch,
+                adv=True,
+                current_mu=current_mu,
+                current_mu_lip=current_mu_lip,
+                lambda_dual=lambda_dual,
+                is_warmup_phase=is_warmup_phase,
+                gamma_violation_tracker=gamma_violation_tracker,
             )
 
         # remember best prec@1 and save checkpoint
@@ -481,7 +507,7 @@ def _model_loop(
     current_mu_lip=0,
     lambda_dual=None,
     is_warmup_phase=False,
-    gamma_violation_tracker=None
+    gamma_violation_tracker=None,
 ):
     """
     *Internal function* (refer to the train_model and eval_model functions for
@@ -597,9 +623,7 @@ def _model_loop(
             if lambda_dual is not None and lambda_dual.shape[0] != inp.shape[0]:
                 lambda_dual = ch.zeros(inp.shape[0], device=device)
         elif not is_train:
-            _, _, _, gamma_violations = calculate_barrier_losses(
-                model, model_logits, target, args, 0, 0, None
-            )
+            _, _, _, gamma_violations = calculate_barrier_losses(model, model_logits, target, args, 0, 0, None)
 
         gamma_violation_meter.update(gamma_violations, 1)
 
