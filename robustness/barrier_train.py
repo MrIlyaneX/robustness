@@ -103,7 +103,6 @@ def calculate_barrier_losses(
     args,
     current_mu: float,
     current_mu_lip: float,
-    gamma_violation_tracker: dict[str, int],
 ):
     """Calculate margin and Lipschitz barrier losses."""
     global device
@@ -112,37 +111,65 @@ def calculate_barrier_losses(
 
     # Lipschitz Barrier Loss
     num_spectral_norm_layers = 0
-    gamma_violations = 0
     current_lip_bar_sum = ch.tensor(0.0, device=device)
+    gamma_violations = 0
 
-    layer_idx = 0
-    for idx, m in enumerate(model.modules()):
+    for m in model.modules():
         spectral_norm_val = get_spectral_norm(m)
         if spectral_norm_val is not None:
             num_spectral_norm_layers += 1
             log_arg_lip = ch.clamp_min(args.gamma - spectral_norm_val, 1e-8)
             current_lip_bar_sum += -current_mu_lip * ch.log(log_arg_lip)
-
-            layer_key = f"layer_{layer_idx}"
-
+            
             if spectral_norm_val >= args.gamma:
-                # Violates the gamma constraint
-                gamma_violation_tracker[layer_key] = gamma_violation_tracker.get(layer_key, 0) + 1
-                consecutive_violations = gamma_violation_tracker[layer_key]
-                if consecutive_violations >= 3:
-                    warnings.warn(
-                        f"Warning: {layer_key} has violated gamma {consecutive_violations} times in a row (spectral_norm: {spectral_norm_val:.4f}, gamma: {args.gamma:.4f})"
-                    )
                 gamma_violations += 1
-            else:
-                # No violations, reset counter
-                gamma_violation_tracker[layer_key] = 0
-            layer_idx += 1
 
     lip_bar = current_lip_bar_sum / max(num_spectral_norm_layers, 1)
 
     return loss_bar, lip_bar, current_margins, gamma_violations
 
+def check_epoch_gamma_violations(model, args, gamma_violation_tracker, wandb_run=None):
+    """Check gamma violations at the end of epoch and update tracker."""
+    violations_this_epoch = {}
+    total_violations = 0
+    gamma_violation_metric = 0
+    
+    layer_idx = 0
+    for m in model.modules():
+        spectral_norm_val = get_spectral_norm(m)
+        if spectral_norm_val is not None:
+            layer_key = f"layer_{layer_idx}"
+            
+            if spectral_norm_val >= args.gamma:
+                violations_this_epoch[layer_key] = {
+                    'spectral_norm': spectral_norm_val.item(),
+                    'gamma': args.gamma
+                }
+                total_violations += 1
+                
+                # Update consecutive epoch violations
+                gamma_violation_tracker[layer_key] = gamma_violation_tracker.get(layer_key, 0) + 1
+                consecutive_violations = gamma_violation_tracker[layer_key]
+                
+                if consecutive_violations >= 3:
+                    gamma_violation_metric += 1
+                    warning_msg = f"Warning: {layer_key} has violated gamma for {consecutive_violations} consecutive epochs (spectral_norm: {spectral_norm_val:.4f}, gamma: {args.gamma:.4f})"
+                    warnings.warn(warning_msg)
+                    
+                    if wandb_run is not None:
+                        wandb_run.log({
+                            f"warnings/{layer_key}_gamma_violation": consecutive_violations,
+                            f"warnings/{layer_key}_spectral_norm": spectral_norm_val.item(),
+                            f"warnings/{layer_key}_gamma": args.gamma,
+                            "warnings/gamma_violation_message": warning_msg
+                        }, commit=False)
+            else:
+                # No violation this epoch, reset counter
+                gamma_violation_tracker[layer_key] = 0
+            
+            layer_idx += 1
+    
+    return violations_this_epoch, total_violations, gamma_violation_metric
 
 def make_optimizer_and_schedule(
     args: object, model: ch.nn.Module, checkpoint: dict[str, Any], params: list[Any] | None
@@ -426,6 +453,11 @@ def train_model(
                 gamma_violation_tracker=gamma_violation_tracker,
             )
 
+        # Check gamma violations at the end of each epoch
+        _, total_violations_this_epoch, gamma_violation_metric = check_epoch_gamma_violations(
+            model, args, gamma_violation_tracker, wandb_run
+        )
+
         # remember best prec@1 and save checkpoint
         prec1_key = f"{'adv' if args.adv_train else 'nat'}_prec1"
         our_prec1 = adv_val_prec1 if args.adv_train else nat_prec1
@@ -465,6 +497,8 @@ def train_model(
             "val/adv_prec1": adv_val_prec1,
             "val/adv_prec5": adv_val_prec5,
             "total_time": time.time() - start_time,
+            "gamma_violations/total_violations_this_epoch": total_violations_this_epoch,
+            "gamma_violations/gamma_violation_metric": gamma_violation_metric,
         }
 
         if not is_warmup_phase:
@@ -612,7 +646,7 @@ def _model_loop(
 
         if is_train and not is_warmup_phase:
             loss_bar, lip_bar, current_margins, gamma_violations = calculate_barrier_losses(
-                model, model_logits, target, args, current_mu, current_mu_lip, gamma_violation_tracker
+                model, model_logits, target, args, current_mu, current_mu_lip
             )
 
             margin_barrier_losses.update(loss_bar.item(), inp.size(0))
@@ -623,7 +657,7 @@ def _model_loop(
             if lambda_dual is not None and lambda_dual.shape[0] != inp.shape[0]:
                 lambda_dual = ch.zeros(inp.shape[0], device=device)
         elif not is_train:
-            _, _, _, gamma_violations = calculate_barrier_losses(model, model_logits, target, args, 0, 0, None)
+            _, _, _, _ = calculate_barrier_losses(model, model_logits, target, args, 0, 0)
 
         gamma_violation_meter.update(gamma_violations, 1)
 
