@@ -387,6 +387,31 @@ class CIFAR(DataSet):
         return cifar_models.__dict__[arch](num_classes=self.num_classes)
 
 
+class CIFAR100(DataSet):
+    """
+    CIFAR-100 dataset (https://www.cs.toronto.edu/~kriz/cifar.html)
+    Dataset with 100 classes containing 600 images each.
+    """
+    
+    def __init__(self, data_path="/tmp/", **kwargs):
+        ds_kwargs = {
+            "num_classes": 100,
+            "mean": ch.tensor([0.5071, 0.4865, 0.4409]),
+            "std": ch.tensor([0.2673, 0.2564, 0.2762]),
+            "custom_class": datasets.CIFAR100,
+            "label_mapping": None,
+            "transform_train": da.TRAIN_TRANSFORMS_DEFAULT(32),
+            "transform_test": da.TEST_TRANSFORMS_DEFAULT(32),
+        }
+        ds_kwargs = self.override_args(ds_kwargs, kwargs)
+        super(CIFAR100, self).__init__("cifar100", data_path, **ds_kwargs)
+
+    def get_model(self, arch, pretrained):
+        if pretrained:
+            raise ValueError("CIFAR100 does not support pytorch_pretrained=True")
+        return cifar_models.__dict__[arch](num_classes=self.num_classes)
+
+
 class CINIC(DataSet):
     """
     CINIC-10 dataset [DCA+18]_.
@@ -408,7 +433,7 @@ class CINIC(DataSet):
             "std": ch.tensor([0.24205776, 0.23828046, 0.25874835]),
             "custom_class": None,
             "label_mapping": None,
-            "transform_train": da.TRAIN_TRANSFORMS_DEFAULT(32),
+            "transform_train": da.TRA,
             "transform_test": da.TEST_TRANSFORMS_DEFAULT(32),
         }
         ds_kwargs = self.override_args(ds_kwargs, kwargs)
@@ -517,6 +542,7 @@ DATASETS = {
     "a2b": A2B,
     "places365": Places365,
     "openimages": OpenImages,
+    "cifar100": CIFAR100
 }
 """
 Dictionary of datasets. A dataset class can be accessed as:
