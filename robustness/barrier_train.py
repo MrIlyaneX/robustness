@@ -1,3 +1,5 @@
+"""Module for Barrier Traning logic"""
+
 import os
 import time
 import warnings
@@ -8,26 +10,23 @@ import numpy as np
 import torch as ch
 from torch.optim import SGD, lr_scheduler
 
-from .barrier_loss import logarithmic_barrier_loss, per_sample_margin_loss
+from .barrier_loss import logarithmic_barrier_loss
 from .cifar_models.resnet import get_spectral_norm
 from .tools import constants as consts
 from .tools import helpers
 from .tools.helpers import AverageMeter, ckpt_at_epoch, has_attr
 
 if int(os.environ.get("NOTEBOOK_MODE", 0)) == 1:
-    from tqdm import tqdm_notebook as tqdm
+    from tqdm import tqdm_notebook as tqdm  # type: ignore
 else:
-    from tqdm import tqdm as tqdm
+    from tqdm import tqdm
 
 try:
     from apex import amp
-except Exception as e:
+except Exception:
     # warnings.warn("Could not import amp.")
     pass
 
-import math
-
-math.log(float(1e-6))
 
 global_step = 0
 
@@ -120,7 +119,7 @@ def calculate_barrier_losses(
             num_spectral_norm_layers += 1
             log_arg_lip = ch.clamp_min(args.gamma - spectral_norm_val, 1e-8)
             current_lip_bar_sum += -current_mu_lip * ch.log(log_arg_lip)
-            
+
             if spectral_norm_val >= args.gamma:
                 gamma_violations += 1
 
@@ -128,51 +127,65 @@ def calculate_barrier_losses(
 
     return loss_bar, lip_bar, current_margins, gamma_violations
 
-def check_epoch_gamma_violations(model, args, gamma_violation_tracker, wandb_run=None):
+
+def check_epoch_gamma_violations(
+    model: ch.nn.Module,
+    args: object,
+    gamma_violation_tracker: dict[str, Any],
+    wandb_run: None | Any = None,
+) -> tuple[dict[Any, Any], int, int]:
     """Check gamma violations at the end of epoch and update tracker."""
     violations_this_epoch = {}
     total_violations = 0
     gamma_violation_metric = 0
-    
+
     layer_idx = 0
+    const_gamma: float = args.gamma  # type: ignore
     for m in model.modules():
         spectral_norm_val = get_spectral_norm(m)
         if spectral_norm_val is not None:
             layer_key = f"layer_{layer_idx}"
-            
-            if spectral_norm_val >= args.gamma:
+
+            if spectral_norm_val >= const_gamma:
                 violations_this_epoch[layer_key] = {
-                    'spectral_norm': spectral_norm_val.item(),
-                    'gamma': args.gamma
+                    "spectral_norm": spectral_norm_val.item(),
+                    "gamma": args.gamma,
                 }
                 total_violations += 1
-                
+
                 # Update consecutive epoch violations
                 gamma_violation_tracker[layer_key] = gamma_violation_tracker.get(layer_key, 0) + 1
                 consecutive_violations = gamma_violation_tracker[layer_key]
-                
+
                 if consecutive_violations >= 3:
                     gamma_violation_metric += 1
                     warning_msg = f"Warning: {layer_key} has violated gamma for {consecutive_violations} consecutive epochs (spectral_norm: {spectral_norm_val:.4f}, gamma: {args.gamma:.4f})"
                     warnings.warn(warning_msg)
-                    
+
                     if wandb_run is not None:
-                        wandb_run.log({
-                            f"warnings/{layer_key}_gamma_violation": consecutive_violations,
-                            f"warnings/{layer_key}_spectral_norm": spectral_norm_val.item(),
-                            f"warnings/{layer_key}_gamma": args.gamma,
-                            "warnings/gamma_violation_message": warning_msg
-                        }, commit=False)
+                        wandb_run.log(
+                            {
+                                f"warnings/{layer_key}_gamma_violation": consecutive_violations,
+                                f"warnings/{layer_key}_spectral_norm": spectral_norm_val.item(),
+                                f"warnings/{layer_key}_gamma": args.gamma,
+                                "warnings/gamma_violation_message": warning_msg,
+                            },
+                            commit=False,
+                        )
             else:
                 # No violation this epoch, reset counter
                 gamma_violation_tracker[layer_key] = 0
-            
+
             layer_idx += 1
-    
+
     return violations_this_epoch, total_violations, gamma_violation_metric
 
+
 def make_optimizer_and_schedule(
-    args: object, model: ch.nn.Module, checkpoint: dict[str, Any], params: list[Any] | None
+    args: object,
+    model: ch.nn.Module,
+    checkpoint: dict[str, Any],
+    params: list[Any] | None,
 ) -> tuple[Any | SGD, ch.optim.Optimizer | None]:
     """
     *Internal Function* (called directly from train_model)
@@ -208,17 +221,22 @@ def make_optimizer_and_schedule(
     # Make schedule
     schedule = None
     if args.custom_lr_multiplier == "cyclic":
-        eps = args.epochs
-        lr_func = lambda t: np.interp([t], [0, eps * 4 // 15, eps], [0, 1, 0])[0]
+
+        def lr_func(t: int) -> Any:
+            eps = args.epochs
+            return np.interp([t], [0, eps * 4 // 15, eps], [0, 1, 0])[0]
+
         schedule = lr_scheduler.LambdaLR(optimizer, lr_func)
     elif args.custom_lr_multiplier:
         cs = args.custom_lr_multiplier
         periods = eval(cs) if type(cs) is str else cs
         if args.lr_interpolation == "linear":
-            lr_func = lambda t: np.interp([t], *zip(*periods))[0]
+
+            def lr_func(t: int) -> Any:
+                return np.interp([t], *zip(*periods))[0]
         else:
 
-            def lr_func(ep):
+            def lr_func(ep) -> Any:
                 for milestone, lr in reversed(periods):
                     if ep >= milestone:
                         return lr
@@ -250,7 +268,7 @@ def make_optimizer_and_schedule(
     return optimizer, schedule
 
 
-def eval_model(args: object, model: ch.nn.Module, loader: Iterable, wandb_run=None) -> dict[str, Any]:
+def eval_model(args: object, model: ch.nn.Module, loader: Iterable, wandb_run: Any | None = None) -> dict[str, Any]:
     """
     Evaluate a model for standard (and optionally adversarial) accuracy.
 
@@ -268,7 +286,7 @@ def eval_model(args: object, model: ch.nn.Module, loader: Iterable, wandb_run=No
     model = ch.nn.DataParallel(model)
 
     # Nat eval loop
-    nat_prec1, nat_loss, nat_prec5, _, _, _, _ = _model_loop(
+    returned_metrcis = _model_loop(
         args=args,
         loop_type="val",
         loader=loader,
@@ -279,13 +297,16 @@ def eval_model(args: object, model: ch.nn.Module, loader: Iterable, wandb_run=No
         current_mu=0,
         lambda_dual=None,
     )
+    nat_prec1 = returned_metrcis["top1_avg"]
+    nat_loss = returned_metrcis["losses_avg"]
+    nat_prec5 = returned_metrcis["top5_avg"]
 
     adv_prec1, adv_loss, adv_prec5 = float("nan"), float("nan"), float("nan")
     if args.adv_eval:
         args.eps = eval(str(args.eps)) if has_attr(args, "eps") else None
         args.attack_lr = eval(str(args.attack_lr)) if has_attr(args, "attack_lr") else None
         # Adv eval loop
-        adv_prec1, adv_loss, adv_prec5, _, _, _, _ = _model_loop(
+        returned_metrcis = _model_loop(
             args=args,
             loop_type="val",
             loader=loader,
@@ -296,6 +317,9 @@ def eval_model(args: object, model: ch.nn.Module, loader: Iterable, wandb_run=No
             current_mu=0,
             lambda_dual=None,
         )
+        adv_prec1 = returned_metrcis["top1_avg"]
+        adv_loss = returned_metrcis["losses_avg"]
+        adv_prec5 = returned_metrcis["top5_avg"]
 
     wandb_run.log(
         {
@@ -319,8 +343,8 @@ def eval_model(args: object, model: ch.nn.Module, loader: Iterable, wandb_run=No
 
 
 def train_model(
-    args,
-    model,
+    args: object,
+    model: ch.nn.Module,
     loaders,
     *,
     checkpoint=None,
@@ -352,15 +376,17 @@ def train_model(
     else:
         model.to(device=device)
 
-    best_prec1, start_epoch = (0, 0)
+    best_prec1 = 0
+    start_epoch = 0
 
     if checkpoint:
-        start_epoch = checkpoint["epoch"]
+        start_epoch: int = checkpoint["epoch"]
         prec1_key = f"{'adv' if args.adv_train else 'nat'}_prec1"
-        best_prec1 = (
-            checkpoint[prec1_key]
-            if prec1_key in checkpoint
-            else _model_loop(
+        best_prec1 = None
+        if prec1_key in checkpoint:
+            best_prec1 = checkpoint[prec1_key]
+        else:
+            best_prec1 = _model_loop(
                 args=args,
                 loop_type="val",
                 loader=val_loader,
@@ -371,8 +397,7 @@ def train_model(
                 current_mu=0,
                 current_mu_lip=0,
                 lambda_dual=None,
-            )[0]
-        )
+            )["top1_avg"]
 
     # Timestamp for training start time
     start_time = time.time()
@@ -391,15 +416,7 @@ def train_model(
         print(f"\n--- Epoch {epoch + 1}/{args.epochs} ---")
 
         # train for one epoch
-        (
-            train_prec1,
-            train_loss,
-            train_prec5,
-            updated_lambda_dual,
-            train_avg_margins,
-            train_gamma_violation_avg,
-            metrics_cache,
-        ) = _model_loop(
+        returned_metrcis = _model_loop(
             args=args,
             loop_type="train",
             loader=train_loader,
@@ -413,7 +430,14 @@ def train_model(
             is_warmup_phase=is_warmup_phase,
             gamma_violation_tracker=gamma_violation_tracker,
         )
-        lambda_dual = updated_lambda_dual
+
+        train_prec1 = returned_metrcis["top1_avg"]
+        train_loss = returned_metrcis["losses_avg"]
+        train_prec5 = returned_metrcis["top5_avg"]
+        train_avg_margins = returned_metrcis["avg_margins"]
+        train_gamma_violation_avg = returned_metrcis["gamma_violation_meter_avg"]
+        metrics_cache = returned_metrcis["metrics_cache"]
+        lambda_dual = returned_metrcis["lambda_dual"]
 
         if metrics_cache:
             for log_item in metrics_cache:
@@ -425,20 +449,20 @@ def train_model(
 
         ctx = ch.enable_grad() if disable_no_grad else ch.no_grad()
         with ctx:
-            nat_prec1, nat_loss, nat_prec5, _, _, _, _ = _model_loop(args, "val", val_loader, model, None, epoch, False)
+            returned_metrcis = _model_loop(args, "val", val_loader, model, None, epoch, False)
 
-        adv_val_prec1, adv_val_prec5, adv_val_loss = float("nan"), float("nan"), float("nan")
+            nat_prec1 = returned_metrcis["top1_avg"]
+            nat_loss = returned_metrcis["losses_avg"]
+            nat_prec5 = returned_metrcis["top5_avg"]
+
+        adv_val_prec1, adv_val_prec5, adv_val_loss = (
+            float("nan"),
+            float("nan"),
+            float("nan"),
+        )
         should_adv_eval = args.adv_eval or args.adv_train
         if should_adv_eval:
-            (
-                adv_val_prec1,
-                adv_val_loss,
-                adv_val_prec5,
-                _,
-                adv_avg_margins,
-                gamma_violation_avg,
-                _,
-            ) = _model_loop(
+            returned_metrcis: dict[str, Any] = _model_loop(
                 args=args,
                 loop_type="val",
                 loader=val_loader,
@@ -452,6 +476,12 @@ def train_model(
                 is_warmup_phase=is_warmup_phase,
                 gamma_violation_tracker=gamma_violation_tracker,
             )
+
+            adv_val_prec1 = returned_metrcis["top1_avg"]
+            adv_val_loss = returned_metrcis["losses_avg"]
+            adv_val_prec5 = returned_metrcis["top5_avg"]
+            adv_avg_margins = returned_metrcis["avg_margins"]
+            gamma_violation_avg = returned_metrcis["gamma_violation_meter_avg"]
 
         # Check gamma violations at the end of each epoch
         _, total_violations_this_epoch, gamma_violation_metric = check_epoch_gamma_violations(
@@ -542,7 +572,7 @@ def _model_loop(
     lambda_dual=None,
     is_warmup_phase=False,
     gamma_violation_tracker=None,
-):
+) -> dict[str, Any]:
     """
     *Internal function* (refer to the train_model and eval_model functions for
     how to train and evaluate models).
@@ -565,18 +595,18 @@ def _model_loop(
         is_warmup_phase (bool) : Flag to indicate if the model is in the warmup phase.
 
     Returns:
-        A tuple containing:
-        - top1.avg (float): The average Top-1 accuracy over the loop.
-        - losses.avg (float): The average total loss over the loop.
-        - top5.avg (float): The average Top-5 accuracy over the loop.
+        A dict containing following keys with:
+        - top1_avg (float): The average Top-1 accuracy over the loop.
+        - losses_avg (float): The average total loss over the loop.
+        - top5_avg (float): The average Top-5 accuracy over the loop.
         - lambda_dual (torch.Tensor): The updated dual variable.
-        - avg_margins.avg (float): The average margin over the loop.
-        - gamma_violation_meter.avg (float): The average number of gamma violations.
+        - avg_margins (float): The average margin over the loop.
+        - gamma_violation_meter_avg (float): The average number of gamma violations.
         - metrics_cache (list): A list of dictionaries containing iteration-level logs.
     """
     global global_step, device
 
-    if not loop_type in ["train", "val"]:
+    if loop_type not in ["train", "val"]:
         err_msg = "loop_type ({0}) must be 'train' or 'val'".format(loop_type)
         raise ValueError(err_msg)
     is_train = loop_type == "train"
@@ -591,8 +621,6 @@ def _model_loop(
     gamma_violation_meter = AverageMeter()
 
     metrics_cache = []  # Cache for iteration-level metrics
-
-    prec = "NatPrec" if not adv else "AdvPrec"
     loop_msg = "Train" if loop_type == "train" else "Val"
 
     # switch to train/eval mode depending
@@ -623,7 +651,12 @@ def _model_loop(
             "use_best": bool(args.use_best),
         }
 
-    iterator = tqdm(enumerate(loader), total=len(loader), bar_format="{l_bar}{bar:30}{r_bar}", leave=False)
+    iterator = tqdm(
+        enumerate(loader),
+        total=len(loader),
+        bar_format="{l_bar}{bar:30}{r_bar}",
+        leave=False,
+    )
     for i, (inp, target) in iterator:
         global_step += 1
 
@@ -725,10 +758,17 @@ def _model_loop(
 
         # Update the description for the progress bar
         desc = f"{loop_msg} E{epoch:>3d}"
-        base_stats = {"Loss": f"{losses.avg:.3f}", "CE": f"{ce_loss.item():.3f}", "Prec1": f"{top1_acc:.3f}"}
+        base_stats = {
+            "Loss": f"{losses.avg:.3f}",
+            "CE": f"{ce_loss.item():.3f}",
+            "Prec1": f"{top1_acc:.3f}",
+        }
 
         if not is_warmup_phase and is_train:
-            barrier_stats = {"MgnB": f"{margin_barrier_losses.avg:.3f}", "LipB": f"{lip_barrier_losses.avg:.3f}"}
+            barrier_stats = {
+                "MgnB": f"{margin_barrier_losses.avg:.3f}",
+                "LipB": f"{lip_barrier_losses.avg:.3f}",
+            }
             if avg_margins.count > 0:
                 barrier_stats["Mgn"] = f"{avg_margins.avg:.3f}"
             base_stats.update(barrier_stats)
@@ -736,12 +776,13 @@ def _model_loop(
         stats_str = " | ".join(f"{k} {v}" for k, v in base_stats.items())
         iterator.set_description(f"{desc} | {stats_str}")
 
-    return (
-        top1.avg,
-        losses.avg,
-        top5.avg,
-        lambda_dual,
-        avg_margins.avg,
-        gamma_violation_meter.avg,
-        metrics_cache,
-    )
+    data_return: dict[str, Any] = {
+        "top1_avg": top1.avg,
+        "losses_avg": losses.avg,
+        "top5_avg": top5.avg,
+        "lambda_dual": lambda_dual,
+        "avg_margins": avg_margins.avg,
+        "gamma_violation_meter_avg": gamma_violation_meter.avg,
+        "metrics_cache": metrics_cache,
+    }
+    return data_return
