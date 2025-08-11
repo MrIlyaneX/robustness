@@ -297,9 +297,9 @@ def eval_model(args: object, model: ch.nn.Module, loader: Iterable, wandb_run: A
         current_mu=0,
         lambda_dual=None,
     )
-    nat_prec1 = returned_metrcis["top1_avg"]
+    nat_prec1 = returned_metrcis["top1_accuracy_avg"]
     nat_loss = returned_metrcis["losses_avg"]
-    nat_prec5 = returned_metrcis["top5_avg"]
+    nat_prec5 = returned_metrcis["top5_accuracy_avg"]
 
     adv_prec1, adv_loss, adv_prec5 = float("nan"), float("nan"), float("nan")
     if args.adv_eval:
@@ -317,9 +317,10 @@ def eval_model(args: object, model: ch.nn.Module, loader: Iterable, wandb_run: A
             current_mu=0,
             lambda_dual=None,
         )
-        adv_prec1 = returned_metrcis["top1_avg"]
+
+        adv_prec1 = returned_metrcis["top1_accuracy_avg"]
         adv_loss = returned_metrcis["losses_avg"]
-        adv_prec5 = returned_metrcis["top5_avg"]
+        adv_prec5 = returned_metrcis["top5_accuracy_avg"]
 
     wandb_run.log(
         {
@@ -376,17 +377,19 @@ def train_model(
     else:
         model.to(device=device)
 
-    best_prec1 = 0
+    wandb_run.watch(model, log="gradients")
+
+    best_acc1 = 0
     start_epoch = 0
 
     if checkpoint:
         start_epoch: int = checkpoint["epoch"]
         prec1_key = f"{'adv' if args.adv_train else 'nat'}_prec1"
-        best_prec1 = None
+        best_acc1 = None
         if prec1_key in checkpoint:
-            best_prec1 = checkpoint[prec1_key]
+            best_acc1 = checkpoint[prec1_key]
         else:
-            best_prec1 = _model_loop(
+            best_acc1 = _model_loop(
                 args=args,
                 loop_type="val",
                 loader=val_loader,
@@ -397,7 +400,7 @@ def train_model(
                 current_mu=0,
                 current_mu_lip=0,
                 lambda_dual=None,
-            )["top1_avg"]
+            )["top1_accuracy_avg"]
 
     # Timestamp for training start time
     start_time = time.time()
@@ -431,9 +434,10 @@ def train_model(
             gamma_violation_tracker=gamma_violation_tracker,
         )
 
-        train_prec1 = returned_metrcis["top1_avg"]
+        train_acc1 = returned_metrcis["top1_accuracy_avg"]
+        train_top1_accuracy = returned_metrcis["top1_accuracy"]
         train_loss = returned_metrcis["losses_avg"]
-        train_prec5 = returned_metrcis["top5_avg"]
+        train_acc5 = returned_metrcis["top5_accuracy_avg"]
         train_avg_margins = returned_metrcis["avg_margins"]
         train_gamma_violation_avg = returned_metrcis["gamma_violation_meter_avg"]
         metrics_cache = returned_metrcis["metrics_cache"]
@@ -451,11 +455,11 @@ def train_model(
         with ctx:
             returned_metrcis = _model_loop(args, "val", val_loader, model, None, epoch, False)
 
-            nat_prec1 = returned_metrcis["top1_avg"]
+            nat_prec1 = returned_metrcis["top1_accuracy_avg"]
             nat_loss = returned_metrcis["losses_avg"]
-            nat_prec5 = returned_metrcis["top5_avg"]
+            nat_prec5 = returned_metrcis["top5_accuracy_avg"]
 
-        adv_val_prec1, adv_val_prec5, adv_val_loss = (
+        adv_val_acc1, adv_val_acc5, adv_val_loss = (
             float("nan"),
             float("nan"),
             float("nan"),
@@ -477,9 +481,10 @@ def train_model(
                 gamma_violation_tracker=gamma_violation_tracker,
             )
 
-            adv_val_prec1 = returned_metrcis["top1_avg"]
+            adv_val_acc1 = returned_metrcis["top1_accuracy_avg"]
+            adv_val_top1_accuracy = returned_metrcis["top1_accuracy"]
             adv_val_loss = returned_metrcis["losses_avg"]
-            adv_val_prec5 = returned_metrcis["top5_avg"]
+            adv_val_acc5 = returned_metrcis["top5_accuracy_avg"]
             adv_avg_margins = returned_metrcis["avg_margins"]
             gamma_violation_avg = returned_metrcis["gamma_violation_meter_avg"]
 
@@ -490,9 +495,9 @@ def train_model(
 
         # remember best prec@1 and save checkpoint
         prec1_key = f"{'adv' if args.adv_train else 'nat'}_prec1"
-        our_prec1 = adv_val_prec1 if args.adv_train else nat_prec1
-        is_best = our_prec1 > best_prec1
-        best_prec1 = max(our_prec1, best_prec1)
+        our_acc1 = adv_val_acc1 if args.adv_train else nat_prec1
+        is_best = our_acc1 > best_acc1
+        best_acc1 = max(our_acc1, best_acc1)
 
         sd_info = {
             "model": model.state_dict(),
@@ -505,7 +510,7 @@ def train_model(
             "lambda_dual": lambda_dual.cpu().numpy(),
             "iter_step": global_step,
             "gamma_violation_tracker": gamma_violation_tracker,
-            prec1_key: our_prec1,
+            prec1_key: our_acc1,
         }
 
         global_step += 1
@@ -514,18 +519,20 @@ def train_model(
             "epoch_val": epoch,
             "global_step": global_step,
             "val/nat_loss": nat_loss,
-            "val/nat_prec1": nat_prec1,
-            "val/nat_prec5": nat_prec5,
+            "val/nat_acc1": nat_prec1,
+            "val/nat_acc5": nat_prec5,
             "train/epoch_loss": train_loss,
-            "train/epoch_prec1": train_prec1,
-            "train/epoch_prec5": train_prec5,
+            "train/epoch_acc1": train_acc1,
+            "train/epoch_top1_accuracy": train_top1_accuracy,
+            "train/epoch_acc5": train_acc5,
             "train/epochs_lambda_dual": lambda_dual,
             "train/epochs_avg_margins": train_avg_margins,
             "train/epochs_gamma_violation_avg": train_gamma_violation_avg,
             "val/avg_margins": adv_avg_margins,
             "val/adv_loss": adv_val_loss,
-            "val/adv_prec1": adv_val_prec1,
-            "val/adv_prec5": adv_val_prec5,
+            "val/adv_acc1": adv_val_acc1,
+            "val/adv_acc5": adv_val_acc5,
+            "val/val_top1_accuracy": adv_val_top1_accuracy,
             "total_time": time.time() - start_time,
             "gamma_violations/total_violations_this_epoch": total_violations_this_epoch,
             "gamma_violations/gamma_violation_metric": gamma_violation_metric,
@@ -596,9 +603,9 @@ def _model_loop(
 
     Returns:
         A dict containing following keys with:
-        - top1_avg (float): The average Top-1 accuracy over the loop.
+        - top1_accuracy_avg (float): The average Top-1 accuracy over the loop.
         - losses_avg (float): The average total loss over the loop.
-        - top5_avg (float): The average Top-5 accuracy over the loop.
+        - top5_accuracy_avg (float): The average Top-5 accuracy over the loop.
         - lambda_dual (torch.Tensor): The updated dual variable.
         - avg_margins (float): The average margin over the loop.
         - gamma_violation_meter_avg (float): The average number of gamma violations.
@@ -612,8 +619,8 @@ def _model_loop(
     is_train = loop_type == "train"
 
     losses = AverageMeter()
-    top1 = AverageMeter()
-    top5 = AverageMeter()
+    top1_accuracy = AverageMeter()
+    top5_accuracy = AverageMeter()
 
     margin_barrier_losses = AverageMeter()
     lip_barrier_losses = AverageMeter()
@@ -657,7 +664,7 @@ def _model_loop(
         bar_format="{l_bar}{bar:30}{r_bar}",
         leave=False,
     )
-    for i, (inp, target) in iterator:
+    for _, (inp, target) in iterator:
         global_step += 1
 
         inp = inp.to(device, non_blocking=True)
@@ -677,20 +684,17 @@ def _model_loop(
         current_margins = None
         gamma_violations = 0
 
-        if is_train and not is_warmup_phase:
-            loss_bar, lip_bar, current_margins, gamma_violations = calculate_barrier_losses(
-                model, model_logits, target, args, current_mu, current_mu_lip
-            )
+        loss_bar, lip_bar, current_margins, gamma_violations = calculate_barrier_losses(
+            model, model_logits, target, args, current_mu, current_mu_lip
+        )
 
-            margin_barrier_losses.update(loss_bar.item(), inp.size(0))
-            lip_barrier_losses.update(lip_bar.item(), inp.size(0))
-            if current_margins is not None:
-                avg_margins.update(current_margins.mean(), inp.size(0))
+        margin_barrier_losses.update(loss_bar.item(), inp.size(0))
+        lip_barrier_losses.update(lip_bar.item(), inp.size(0))
+        if current_margins is not None:
+            avg_margins.update(current_margins.mean(), inp.size(0))
 
-            if lambda_dual is not None and lambda_dual.shape[0] != inp.shape[0]:
-                lambda_dual = ch.zeros(inp.shape[0], device=device)
-        elif not is_train:
-            _, _, _, _ = calculate_barrier_losses(model, model_logits, target, args, 0, 0)
+        if lambda_dual is not None and lambda_dual.shape[0] != inp.shape[0]:
+            lambda_dual = ch.zeros(inp.shape[0], device=device)
 
         gamma_violation_meter.update(gamma_violations, 1)
 
@@ -703,17 +707,17 @@ def _model_loop(
         try:
             maxk = min(5, model_logits.shape[-1])
             if has_attr(args, "custom_accuracy"):
-                prec1, prec5 = args.custom_accuracy(model_logits, target)
+                accuracy_1, accuracy_5 = args.custom_accuracy(model_logits, target)
             else:
-                prec1, prec5 = helpers.accuracy(model_logits, target, topk=(1, maxk))
-                prec1, prec5 = prec1[0], prec5[0]
+                accuracy_1, accuracy_5 = helpers.accuracy(model_logits, target, topk=(1, maxk))
+                accuracy_1, accuracy_5 = accuracy_1[0], accuracy_5[0]
 
             losses.update(loss.item(), inp.size(0))
-            top1.update(prec1, inp.size(0))
-            top5.update(prec5, inp.size(0))
+            top1_accuracy.update(accuracy_1, inp.size(0))
+            top5_accuracy.update(accuracy_5, inp.size(0))
 
-            top1_acc = top1.avg
-            top5_acc = top5.avg
+            top1_acc = top1_accuracy.avg
+            top5_acc = top5_accuracy.avg
         except Exception as e:
             warnings.warn(f"Failed to calculate the accuracy. Error: {e}")
             losses.update(loss.item(), inp.size(0))
@@ -743,8 +747,8 @@ def _model_loop(
                 "global_step": global_step,
                 "train/iter_loss": loss.item(),
                 "train/iter_ce_loss": ce_loss.item(),
-                "train/iter_prec1": prec1,
-                "train/iter_prec5": prec5,
+                "train/iter_acc1": accuracy_1,
+                "train/iter_acc5": accuracy_5,
             }
             if not is_warmup_phase:
                 iteration_log_dict["train/iter_margin_barrier_loss"] = loss_bar.item()
@@ -761,7 +765,7 @@ def _model_loop(
         base_stats = {
             "Loss": f"{losses.avg:.3f}",
             "CE": f"{ce_loss.item():.3f}",
-            "Prec1": f"{top1_acc:.3f}",
+            "Accuracy1": f"{top1_acc:.3f}",
         }
 
         if not is_warmup_phase and is_train:
@@ -777,9 +781,10 @@ def _model_loop(
         iterator.set_description(f"{desc} | {stats_str}")
 
     data_return: dict[str, Any] = {
-        "top1_avg": top1.avg,
+        "top1_accuracy_avg": top1_accuracy.avg,
+        "top1_accuracy": top1_acc,
         "losses_avg": losses.avg,
-        "top5_avg": top5.avg,
+        "top5_accuracy_avg": top5_accuracy.avg,
         "lambda_dual": lambda_dual,
         "avg_margins": avg_margins.avg,
         "gamma_violation_meter_avg": gamma_violation_meter.avg,
