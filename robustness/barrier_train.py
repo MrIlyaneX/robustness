@@ -10,6 +10,7 @@ import numpy as np
 import torch as ch
 from torch.optim import SGD, lr_scheduler
 
+from .utils import project_weights_after_step
 from .barrier_loss import logarithmic_barrier_loss
 from .cifar_models.resnet import get_spectral_norm
 from .tools import constants as consts
@@ -157,6 +158,7 @@ def check_epoch_gamma_violations(
                             "warnings/gamma_violation_message": warning_msg,
                         }, commit=False)
             else:
+                print(f"{layer_key} spectral norm: {spectral_norm_val:.4f}")
                 gamma_violation_tracker[layer_key] = 0
             layer_idx += 1
     return violations_this_epoch, total_violations, gamma_violation_metric
@@ -456,6 +458,9 @@ def _model_loop(
             else:
                 loss.backward()
             opt.step()
+            
+            project_weights_after_step(model)
+            
             if not is_warmup_phase and current_margins is not None:
                 if lambda_dual is not None and lambda_dual.shape[0] != inp.shape[0]:
                     lambda_dual = ch.zeros(inp.shape[0], device=device)

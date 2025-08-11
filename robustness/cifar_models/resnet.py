@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from ..tools.custom_modules import SequentialWithArgs, FakeReLU
-from torch.nn.utils import spectral_norm
+from ..utils import conv_spectral_norm as spectral_norm
 
 
 def get_spectral_norm(module: nn.Module) -> None | Any:
