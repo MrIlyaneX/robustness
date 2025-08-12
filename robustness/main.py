@@ -67,13 +67,6 @@ def main(args):
     if "module" in dir(model):
         model = model.module
 
-    print(args)
-    if args.eval_only:
-        if args.loss_type == "margin_barrier":
-            return eval_barrier_model(args, model, val_loader)
-        else:  # Default or 'ce'
-            return eval_standard_model(args, model, val_loader, store=None)
-
     if not args.resume_optimizer:
         checkpoint = None
 
@@ -84,8 +77,19 @@ def main(args):
         print(f"Using standard training with loss type: {args.loss_type}")
         model = train_standard_model(args, model, loaders, store=None, checkpoint=checkpoint)
 
-    wandb.finish()
-    return model
+    print(args)
+    # if args.eval_only:
+    if args.loss_type == "margin_barrier":
+        return_val = eval_barrier_model(args, model, val_loader, wandb_run)
+        wandb.finish()
+        return return_val
+    else:
+        return_val = eval_standard_model(args, model, val_loader, wandb_run)
+        wandb.finish()
+        return return_val
+
+    # wandb.finish()
+    # return model
 
 
 def setup_args(args):

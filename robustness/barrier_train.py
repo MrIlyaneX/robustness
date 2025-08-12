@@ -10,6 +10,8 @@ import numpy as np
 import torch as ch
 from torch.optim import SGD, lr_scheduler
 
+from autoattack import AutoAttack
+
 from .barrier_loss import logarithmic_barrier_loss
 from .cifar_models.resnet import get_spectral_norm
 from .tools import constants as consts
@@ -267,14 +269,70 @@ def make_optimizer_and_schedule(
 
     return optimizer, schedule
 
+def eval_model_autoattack(
+    model: ch.nn.Module,
+    loader: Iterable,
+    constraint: str = 'inf',
+    eps: float = 8/255
+) -> float:
+    """
+    Evaluate a model's robust accuracy using AutoAttack.
+    Note: This is computationally expensive.
+
+    Args:
+        model (ch.nn.Module): The model to evaluate.
+        loader (iterable): Data loader for the validation set.
+        constraint (str): The norm constraint for the attack ('inf' or '2').
+        eps (float): The epsilon budget for the attack.
+
+    Returns:
+        float: The robust accuracy from AutoAttack.
+    """
+    global device
+    print("\nRunning AutoAttack evaluation...")
+    start_time = time.time()
+
+    # AutoAttack expects the unwrapped model
+    unwrapped_model = model.module if hasattr(model, "module") else model
+    unwrapped_model.eval()
+
+    x_test, y_test = [], []
+    for inp, target in tqdm(loader, total=len(loader), desc="[AutoAttack] Loading data"):
+        x_test.append(inp)
+        y_test.append(target)
+    x_test = ch.cat(x_test, dim=0).to(device)
+    y_test = ch.cat(y_test, dim=0).to(device)
+
+    norm_map = {'inf': 'Linf', '2': 'L2'}
+    if constraint not in norm_map:
+        print(f"Warning: Constraint '{constraint}' not supported by this AutoAttack script. Skipping.")
+        return float('nan')
+    norm = norm_map[constraint]
+
+    adversary = AutoAttack(lambda x: unwrapped_model(x)[0], norm=norm, eps=eps, device=device, verbose=False)
+
+    x_adv = adversary.run_standard_evaluation(x_test, y_test)
+
+    # Calculate robust accuracy on the adversarial examples
+    with ch.no_grad():
+        output = unwrapped_model(x_adv)
+        logits = output[0] if isinstance(output, tuple) else output
+
+        is_correct = ch.argmax(logits, dim=1) == y_test
+        robust_accuracy = 100. * is_correct.sum().item() / len(y_test)
+
+    print(f"AutoAttack evaluation finished in {time.time() - start_time:.2f}s. Robust Accuracy: {robust_accuracy:.2f}%")
+    return robust_accuracy
 
 def eval_model(args: object, model: ch.nn.Module, loader: Iterable, wandb_run: Any | None = None) -> dict[str, Any]:
     """
     Evaluate a model for standard (and optionally adversarial) accuracy.
+    Can also run an optional AutoAttack evaluation.
 
     Args:
         args (object) : A list of arguments---should be a python object
-            implementing ``getattr()`` and ``setattr()``.
+            implementing ``getattr()`` and ``setattr()``. To run AutoAttack,
+            `args` must have `autoattack_eval=True`.
         model (AttackerModel) : model to evaluate
         loader (iterable) : a dataloader serving `(input, label)` batches from
             the validation set
@@ -316,14 +374,19 @@ def eval_model(args: object, model: ch.nn.Module, loader: Iterable, wandb_run: A
             current_mu=0,
             lambda_dual=None,
         )
-
         adv_accuracy = returned_metrcis["accuracy_avg"]
         adv_loss = returned_metrcis["losses_avg"]
+
+    autoattack_accuracy = float("nan")
+    # # To enable AutoAttack``, pass `autoattack-eval=True` in the args object
+    if has_attr(args, "autoattack_eval") and args.autoattack_eval and args.adv_eval:
+        autoattack_accuracy = eval_model_autoattack(model, loader)
 
     wandb_run.log(
         {
             "eval/nat_accuracy": nat_accuracy,
             "eval/adv_accuracy": adv_accuracy,
+            "eval/autoattack_accuracy": autoattack_accuracy,
             "eval/nat_loss": nat_loss,
             "eval/adv_loss": adv_loss,
             "eval/time": time.time() - start_time,
@@ -332,6 +395,7 @@ def eval_model(args: object, model: ch.nn.Module, loader: Iterable, wandb_run: A
     return {
         "nat_accuracy": nat_accuracy,
         "adv_accuracy": adv_accuracy,
+        "autoattack_accuracy": autoattack_accuracy,
         "nat_loss": nat_loss,
         "adv_loss": adv_loss,
     }
@@ -371,19 +435,18 @@ def train_model(
     else:
         model.to(device=device)
 
-    watched_model = model.module if hasattr(model, "module") else model
-    wandb_run.watch(watched_model, opt, log="gradients", log_freq=1, log_graph=True)
+    wandb_run.watch(model, log="gradients")
 
-    best_accuracy = 0
+    best_accuracy = 0.0
     start_epoch = 0
 
     if checkpoint:
         start_epoch: int = checkpoint["epoch"]
         acc_key = f"{'adv' if args.adv_train else 'nat'}_accuracy"
-        best_accuracy = None
         if acc_key in checkpoint:
             best_accuracy = checkpoint[acc_key]
         else:
+            # Get last accuracy from validation set
             best_accuracy = _model_loop(
                 args=args,
                 loop_type="val",
@@ -414,7 +477,7 @@ def train_model(
         print(f"\n--- Epoch {epoch + 1}/{args.epochs} ---")
 
         # train for one epoch
-        returned_metrcis = _model_loop(
+        train_metrics = _model_loop(
             args=args,
             loop_type="train",
             loader=train_loader,
@@ -429,12 +492,12 @@ def train_model(
             gamma_violation_tracker=gamma_violation_tracker,
         )
 
-        train_accuracy = returned_metrcis["accuracy_avg"]
-        train_loss = returned_metrcis["losses_avg"]
-        train_avg_margins = returned_metrcis["avg_margins"]
-        train_gamma_violation_avg = returned_metrcis["gamma_violation_meter_avg"]
-        metrics_cache = returned_metrcis["metrics_cache"]
-        lambda_dual = returned_metrcis["lambda_dual"]
+        train_accuracy = train_metrics["accuracy_avg"]
+        train_loss = train_metrics["losses_avg"]
+        train_avg_margins = train_metrics["avg_margins"]
+        train_gamma_violation_avg = train_metrics["gamma_violation_meter_avg"]
+        metrics_cache = train_metrics["metrics_cache"]
+        lambda_dual = train_metrics["lambda_dual"]
 
         if metrics_cache:
             for log_item in metrics_cache:
@@ -446,18 +509,16 @@ def train_model(
 
         ctx = ch.enable_grad() if disable_no_grad else ch.no_grad()
         with ctx:
-            returned_metrcis = _model_loop(args, "val", val_loader, model, None, epoch, False)
+            val_metrics = _model_loop(args, "val", val_loader, model, None, epoch, False)
+            nat_accuracy = val_metrics["accuracy_avg"]
+            nat_loss = val_metrics["losses_avg"]
 
-            nat_accuracy = returned_metrcis["accuracy_avg"]
-            nat_loss = returned_metrcis["losses_avg"]
-
-        adv_val_accuracy, adv_val_loss = (
-            float("nan"),
-            float("nan"),
+        adv_val_accuracy, adv_val_loss, adv_avg_margins, gamma_violation_avg = (
+            float("nan"), float("nan"), float("nan"), float("nan")
         )
         should_adv_eval = args.adv_eval or args.adv_train
         if should_adv_eval:
-            returned_metrcis: dict[str, Any] = _model_loop(
+            adv_val_metrics = _model_loop(
                 args=args,
                 loop_type="val",
                 loader=val_loader,
@@ -472,10 +533,10 @@ def train_model(
                 gamma_violation_tracker=gamma_violation_tracker,
             )
 
-            adv_val_accuracy = returned_metrcis["accuracy_avg"]
-            adv_val_loss = returned_metrcis["losses_avg"]
-            adv_avg_margins = returned_metrcis["avg_margins"]
-            gamma_violation_avg = returned_metrcis["gamma_violation_meter_avg"]
+            adv_val_accuracy = adv_val_metrics["accuracy_avg"]
+            adv_val_loss = adv_val_metrics["losses_avg"]
+            adv_avg_margins = adv_val_metrics["avg_margins"]
+            gamma_violation_avg = adv_val_metrics["gamma_violation_meter_avg"]
 
         # Check gamma violations at the end of each epoch
         _, total_violations_this_epoch, gamma_violation_metric = check_epoch_gamma_violations(
@@ -504,8 +565,7 @@ def train_model(
 
         global_step += 1
         wandb_log_dict = {
-            "epoch_train": epoch,
-            "epoch_val": epoch,
+            "epoch": epoch,
             "global_step": global_step,
             "val/nat_loss": nat_loss,
             "val/nat_accuracy": nat_accuracy,
@@ -570,23 +630,6 @@ def _model_loop(
 
     This function contains the core training or evaluation loop over a single
     epoch.
-
-    Args:
-        args (object) : A list of arguments.
-        loop_type (str) : 'train' or 'val'. Determines whether to train or
-                          evaluate the model.
-        loader (iterable) : Data loader for the current loop.
-        model (AttackerModel) : The model to train or evaluate.
-        opt (torch.optim.Optimizer, optional) : The optimizer for training. Defaults to None.
-        epoch (int) : The current epoch number.
-        adv (bool) : Whether to perform adversarial training/evaluation.
-        current_mu (float) : Current value for the margin barrier loss parameter mu.
-        current_mu_lip (float) : Current value for the Lipschitz barrier loss parameter mu_lip.
-        lambda_dual (torch.Tensor) : Dual variable for the barrier loss.
-        is_warmup_phase (bool) : Flag to indicate if the model is in the warmup phase.
-
-    Returns:
-        A dict containing a summary of the loop's performance.
     """
     global global_step, device
 
@@ -597,7 +640,6 @@ def _model_loop(
 
     losses = AverageMeter()
     accuracy_meter = AverageMeter()
-
     margin_barrier_losses = AverageMeter()
     lip_barrier_losses = AverageMeter()
     avg_margins = AverageMeter()
@@ -606,15 +648,12 @@ def _model_loop(
     metrics_cache = []  # Cache for iteration-level metrics
     loop_msg = "Train" if loop_type == "train" else "Val"
 
-    # switch to train/eval mode depending
     model = model.train() if is_train else model.eval()
 
-    # If adv training (or evaling), set eps and random_restarts appropriately
     if adv:
         eps = args.custom_eps_multiplier(epoch) * args.eps if (is_train and args.custom_eps_multiplier) else args.eps
         random_restarts = 0 if is_train else args.random_restarts
 
-    # Custom training criterion
     has_custom_train_loss = has_attr(args, "custom_train_loss")
     train_criterion = args.custom_train_loss if has_custom_train_loss else ch.nn.CrossEntropyLoss()
 
@@ -640,25 +679,17 @@ def _model_loop(
         bar_format="{l_bar}{bar:30}{r_bar}",
         leave=False,
     )
-    for _, (inp, target) in iterator:
-        global_step += 1
+    for i, (inp, target) in iterator:
+        global_step += 1 if is_train else 0
 
         inp = inp.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
 
         output, final_inp = model(inp, target=target, make_adv=adv, **attack_kwargs)
+        model_logits = output[0] if isinstance(output, tuple) else output
 
-        model_logits = output[0] if (type(output) is tuple) else output
-
-        # CE loss
         ce_loss = train_criterion(model_logits, target)
         ce_loss = ce_loss.mean() if len(ce_loss.shape) > 0 else ce_loss
-
-        # Initialize barrier losses
-        loss_bar = ch.tensor(0.0, device=device)
-        lip_bar = ch.tensor(0.0, device=device)
-        current_margins = None
-        gamma_violations = 0
 
         loss_bar, lip_bar, current_margins, gamma_violations = calculate_barrier_losses(
             model, model_logits, target, args, current_mu, current_mu_lip
@@ -667,38 +698,33 @@ def _model_loop(
         margin_barrier_losses.update(loss_bar.item(), inp.size(0))
         lip_barrier_losses.update(lip_bar.item(), inp.size(0))
         if current_margins is not None:
-            avg_margins.update(current_margins.mean(), inp.size(0))
+            avg_margins.update(current_margins.mean().item(), inp.size(0))
 
         if lambda_dual is not None and lambda_dual.shape[0] != inp.shape[0]:
             lambda_dual = ch.zeros(inp.shape[0], device=device)
 
         gamma_violation_meter.update(gamma_violations, 1)
 
-        # Total Loss
         loss = ce_loss + loss_bar + lip_bar
-
-        # measure accuracy and record loss
-        current_accuracy_avg = float("nan")
+        
         try:
             if has_attr(args, "custom_accuracy"):
                 batch_accuracy = args.custom_accuracy(model_logits, target)
             else:
                 batch_accuracy = helpers.accuracy(model_logits, target)
-
+            
             losses.update(loss.item(), inp.size(0))
             accuracy_meter.update(batch_accuracy, inp.size(0))
-            current_accuracy_avg = accuracy_meter.avg
-
         except Exception as e:
-            warnings.warn(f"Failed to calculate the accuracy. Error: {e}")
+            warnings.warn(f"Failed to calculate accuracy. Error: {e}")
             losses.update(loss.item(), inp.size(0))
+
 
         reg_term = 0.0
         if has_attr(args, "regularizer"):
             reg_term = args.regularizer(model, inp, target)
         loss = loss + reg_term
 
-        # compute gradient and do SGD step
         if is_train:
             opt.zero_grad()
             if args.mixed_precision:
@@ -708,14 +734,11 @@ def _model_loop(
                 loss.backward()
             opt.step()
 
-            # Dual ascent update for Lambda
             if not is_warmup_phase and current_margins is not None:
                 lambda_dual = (lambda_dual + args.eta * current_margins.detach()).clamp_min_(0)
 
-        if is_train:
             iteration_log_dict = {
                 "iter_step": global_step,
-                "global_step": global_step,
                 "train/iter_loss": loss.item(),
                 "train/iter_ce_loss": ce_loss.item(),
                 "train/iter_accuracy": batch_accuracy,
@@ -724,18 +747,16 @@ def _model_loop(
                 iteration_log_dict["train/iter_margin_barrier_loss"] = loss_bar.item()
                 iteration_log_dict["train/iter_lip_barrier_loss"] = lip_bar.item()
                 iteration_log_dict["train/iter_gamma_violations"] = gamma_violations
-
                 if current_margins is not None:
                     iteration_log_dict["train/iter_average_margin"] = current_margins.mean().item()
 
             metrics_cache.append(iteration_log_dict)
 
-        # Update the description for the progress bar
         desc = f"{loop_msg} E{epoch:>3d}"
         base_stats = {
             "Loss": f"{losses.avg:.3f}",
             "CE": f"{ce_loss.item():.3f}",
-            "Accuracy": f"{current_accuracy_avg:.3f}",
+            "Acc": f"{accuracy_meter.avg:.3f}",
         }
 
         if not is_warmup_phase and is_train:
@@ -752,7 +773,6 @@ def _model_loop(
 
     data_return: dict[str, Any] = {
         "accuracy_avg": accuracy_meter.avg,
-        "accuracy": current_accuracy_avg,
         "losses_avg": losses.avg,
         "lambda_dual": lambda_dual,
         "avg_margins": avg_margins.avg,

@@ -101,6 +101,7 @@ TRAINING_ARGS = [
     ["mu-lip", float, "Initial strength (weight) of the Lipschitz barrier loss.", 0.01],
     ["eta", float, "Learning rate for the dual variable update (lambda).", 0.01],
     ["warmup-epochs", int, "Number of epochs to train only with CE loss before activating barrier losses.", 0],
+    ["autoattack-eval", [0, 1], "whether to run AutoAttack evaluation", 0],
     # END NEW PARAMS
     ["log-iters", int, "how frequently (in epochs) to log", 5],
     [
