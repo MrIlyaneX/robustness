@@ -9,6 +9,7 @@ import dill
 import numpy as np
 import torch as ch
 from torch.optim import SGD, lr_scheduler
+from autoattack import AutoAttack
 
 from .utils import project_weights_after_step
 from .barrier_loss import logarithmic_barrier_loss
@@ -21,13 +22,6 @@ if int(os.environ.get("NOTEBOOK_MODE", 0)) == 1:
     from tqdm import tqdm_notebook as tqdm  # type: ignore
 else:
     from tqdm import tqdm
-
-try:
-    from apex import amp
-except Exception:
-    # warnings.warn("Could not import amp.")
-    pass
-
 
 global_step = 0
 
@@ -227,11 +221,7 @@ def make_optimizer_and_schedule(
     param_list = model.parameters() if params is None else params
     optimizer = SGD(param_list, args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
-    if args.mixed_precision:
-        model.to("cuda")
-        model, optimizer = amp.initialize(model, optimizer, "O1")
-    else:
-        model.to(device=device)
+    model.to(device=device)
 
     schedule = None
     if args.custom_lr_multiplier == "cyclic":
@@ -266,10 +256,6 @@ def make_optimizer_and_schedule(
             for _ in range(steps_to_take):
                 if schedule:
                     schedule.step()
-        if "amp" in checkpoint and checkpoint["amp"] not in [None, "N/A"]:
-            amp.load_state_dict(checkpoint["amp"])
-        if args.mixed_precision:
-            model.load_state_dict(checkpoint["model"])
     return optimizer, schedule
 
 
@@ -288,9 +274,6 @@ def eval_model(args: object, model: ch.nn.Module, loader: Iterable, wandb_run: A
     """
     check_required_args(args, eval_only=True)
     start_time = time.time()
-
-    assert not hasattr(model, "module"), "model is already in DataParallel."
-    model = ch.nn.DataParallel(model)
 
     # Nat eval loop
     returned_metrcis = _model_loop(
@@ -373,12 +356,6 @@ def train_model(
     train_loader, val_loader = loaders
     opt, schedule = make_optimizer_and_schedule(args, model, checkpoint, update_params)
 
-    assert not hasattr(model, "module"), "model is already in DataParallel."
-    if ch.cuda.is_available():
-        model = ch.nn.DataParallel(model, device_ids=dp_device_ids).cuda()
-    else:
-        model.to(device=device)
-
     if wandb_run:
         watched_model = model.module if hasattr(model, "module") else model
         wandb_run.watch(watched_model, opt, log="gradients", log_freq=1, log_graph=True)
@@ -439,7 +416,7 @@ def train_model(
         best_acc = max(our_acc, best_acc)
         acc_key = f"{'adv' if args.adv_train else 'nat'}_acc"
 
-        sd_info = {"model": model.state_dict(), "optimizer": opt.state_dict(), "schedule": (schedule and schedule.state_dict()), "epoch": epoch + 1, "amp": (amp.state_dict() if args.mixed_precision else None), "mu": current_mu, "mu_lip": current_mu_lip, "lambda_dual": lambda_dual.cpu().numpy(), "iter_step": global_step, "gamma_violation_tracker": gamma_violation_tracker, acc_key: our_acc}
+        sd_info = {"model": model.state_dict(), "optimizer": opt.state_dict(), "schedule": (schedule and schedule.state_dict()), "epoch": epoch + 1, "gamma_violation_tracker": gamma_violation_tracker, acc_key: our_acc}
 
         if wandb_run:
             global_step += 1
@@ -544,11 +521,7 @@ def _model_loop(
 
         if is_train:
             opt.zero_grad()
-            if args.mixed_precision:
-                with amp.scale_loss(loss, opt) as sl:
-                    sl.backward()
-            else:
-                loss.backward()
+            loss.backward()
             opt.step()
             
             project_weights_after_step(model)
