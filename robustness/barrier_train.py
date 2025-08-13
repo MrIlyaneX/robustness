@@ -269,11 +269,9 @@ def make_optimizer_and_schedule(
 
     return optimizer, schedule
 
+
 def eval_model_autoattack(
-    model: ch.nn.Module,
-    loader: Iterable,
-    constraint: str = 'inf',
-    eps: float = 8/255
+    model: ch.nn.Module, loader: Iterable, constraint: str = "inf", eps: float = 8 / 255
 ) -> float:
     """
     Evaluate a model's robust accuracy using AutoAttack.
@@ -303,10 +301,10 @@ def eval_model_autoattack(
     x_test = ch.cat(x_test, dim=0).to(device)
     y_test = ch.cat(y_test, dim=0).to(device)
 
-    norm_map = {'inf': 'Linf', '2': 'L2'}
+    norm_map = {"inf": "Linf", "2": "L2"}
     if constraint not in norm_map:
         print(f"Warning: Constraint '{constraint}' not supported by this AutoAttack script. Skipping.")
-        return float('nan')
+        return float("nan")
     norm = norm_map[constraint]
 
     adversary = AutoAttack(lambda x: unwrapped_model(x)[0], norm=norm, eps=eps, device=device, verbose=False)
@@ -319,10 +317,11 @@ def eval_model_autoattack(
         logits = output[0] if isinstance(output, tuple) else output
 
         is_correct = ch.argmax(logits, dim=1) == y_test
-        robust_accuracy = 100. * is_correct.sum().item() / len(y_test)
+        robust_accuracy = 100.0 * is_correct.sum().item() / len(y_test)
 
     print(f"AutoAttack evaluation finished in {time.time() - start_time:.2f}s. Robust Accuracy: {robust_accuracy:.2f}%")
     return robust_accuracy
+
 
 def eval_model(args: object, model: ch.nn.Module, loader: Iterable, wandb_run: Any | None = None) -> dict[str, Any]:
     """
@@ -514,7 +513,10 @@ def train_model(
             nat_loss = val_metrics["losses_avg"]
 
         adv_val_accuracy, adv_val_loss, adv_avg_margins, gamma_violation_avg = (
-            float("nan"), float("nan"), float("nan"), float("nan")
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan"),
         )
         should_adv_eval = args.adv_eval or args.adv_train
         if should_adv_eval:
@@ -553,7 +555,8 @@ def train_model(
             "model": model.state_dict(),
             "optimizer": opt.state_dict(),
             "schedule": (schedule and schedule.state_dict()),
-            "epoch": epoch + 1,
+            "epoch_train": epoch,
+            "epoch_val": epoch,
             "amp": amp.state_dict() if args.mixed_precision else None,
             "mu": current_mu,
             "mu_lip": current_mu_lip,
@@ -706,19 +709,18 @@ def _model_loop(
         gamma_violation_meter.update(gamma_violations, 1)
 
         loss = ce_loss + loss_bar + lip_bar
-        
+
         try:
             if has_attr(args, "custom_accuracy"):
                 batch_accuracy = args.custom_accuracy(model_logits, target)
             else:
                 batch_accuracy = helpers.accuracy(model_logits, target)
-            
+
             losses.update(loss.item(), inp.size(0))
             accuracy_meter.update(batch_accuracy, inp.size(0))
         except Exception as e:
             warnings.warn(f"Failed to calculate accuracy. Error: {e}")
             losses.update(loss.item(), inp.size(0))
-
 
         reg_term = 0.0
         if has_attr(args, "regularizer"):
