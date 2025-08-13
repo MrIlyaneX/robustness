@@ -421,6 +421,8 @@ def train_model(
         if wandb_run:
             global_step += 1
             wandb_log_dict = {
+                "epoch_train": epoch,
+                "epoch_val": epoch,
                 "epoch": epoch,
                 "global_step": global_step,
                 "val/nat_loss": nat_loss,
