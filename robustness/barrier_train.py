@@ -152,7 +152,7 @@ def eval_model_autoattack(
         return float("nan")
     norm = norm_map[constraint]
 
-    adversary = AutoAttack(lambda x: unwrapped_model(x)[0], norm=norm, eps=eps, device=device, verbose=False)
+    adversary = AutoAttack(lambda x: unwrapped_model(x)[0], norm=norm, eps=eps, device=device, verbose=True)
 
     x_adv = adversary.run_standard_evaluation(x_test, y_test)
 

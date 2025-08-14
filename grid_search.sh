@@ -9,7 +9,7 @@ gamma_values=(1.3 1.4 1.5)
 delta_values=(0.05 0.1)
 
 # Base command for the training script
-BASE_CMD="uv run -m robustness.main --dataset cifar --data ./data/cifar --adv-train 0 --arch spectral_resnet18 --out-dir ../data/logs/checkpoints/ --epochs 10 --weight-decay 1e-2 --step-lr 2 --workers 2 --constraint random_smooth --eps 0.5 --attack-lr 1.5 --loss-type margin_barrier --batch-size 128 --autoattack-eval 1 --adv-eval 1"
+BASE_CMD="uv run -m robustness.main --dataset cifar --data ./data/cifar --adv-train 0 --arch spectral_resnet18 --out-dir ../data/logs/checkpoints/ --epochs 10 --weight-decay 1e-2 --step-lr 2 --workers 2 --constraint random_smooth --eps 0.5 --attack-lr 1.5 --loss-type margin_barrier --batch-size 128 --autoattack-eval 0 --adv-eval 1"
 
 # --- Initialization ---
 # File to log results of all runs
