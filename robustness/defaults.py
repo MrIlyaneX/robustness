@@ -87,22 +87,22 @@ TRAINING_ARGS = [
     ],
     ["adv-train", [0, 1], "whether to train adversarially", REQ],
     ["adv-eval", [0, 1], "whether to adversarially evaluate", None],
-    # FOR NEW LOSS
+    # --- MODIFIED: Updated loss type options and help string ---
     [
-        "loss-type", 
-        ["ce", "margin_barrier"], 
-        "Type of loss function to use: 'ce' for CrossEntropyLoss, 'margin_barrier' for margin barrier loss", 
+        "loss-type",
+        ["ce", "augmented_lagrangian", "margin_barrier"],
+        "Type of loss: 'ce' for CrossEntropy, 'augmented_lagrangian' for the new method, 'margin_barrier' for legacy barrier method.",
         "ce"
     ],
+    # --- MODIFIED: Added and removed parameters for Augmented Lagrangian ---
     ["num-classes", int, "Number of classes in the dataset", 10],
-    ["delta", float, "Margin parameter for the margin barrier loss.", 0.5],
+    ["delta", float, "Margin parameter for the margin constraint.", 0.5],
     ["gamma", float, "Maximum allowed spectral norm for layers.", 1.5],
-    ["mu", float, "Initial strength (weight) of the margin barrier loss.", 0.01],
-    ["mu-lip", float, "Initial strength (weight) of the Lipschitz barrier loss.", 0.01],
-    ["eta", float, "Learning rate for the dual variable update (lambda).", 0.01],
-    ["warmup-epochs", int, "Number of epochs to train only with CE loss before activating barrier losses.", 0],
+    ["rho", float, "Penalty parameter for the margin constraint in Augmented Lagrangian.", 0.1],
+    ["rho-lip", float, "Penalty parameter for the Lipschitz constraint in Augmented Lagrangian.", 0.1],
+    ["warmup-epochs", int, "Number of epochs to train only with CE loss before activating AL/barrier losses.", 0],
+    # --- END MODIFICATION ---
     ["autoattack-eval", [0, 1], "whether to run AutoAttack evaluation", 0],
-    # END NEW PARAMS
     ["log-iters", int, "how frequently (in epochs) to log", 5],
     [
         "save-ckpt-iters",

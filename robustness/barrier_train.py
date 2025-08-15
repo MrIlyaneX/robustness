@@ -12,7 +12,8 @@ from torch.optim import SGD, lr_scheduler
 from autoattack import AutoAttack
 
 from .utils import project_weights_after_step
-from .barrier_loss import logarithmic_barrier_loss
+# The logarithmic_barrier_loss is no longer the main loss, but we can use it to get margins
+from .barrier_loss import augmented_lagrangian_margin_loss
 from .cifar_models.resnet import get_spectral_norm
 from .tools import constants as consts
 from .tools import helpers
@@ -45,12 +46,11 @@ def check_required_args(args: object, eval_only: bool = False) -> None:
         "lr",
         "momentum",
         "weight_decay",
-        # Required arguments for barrier methods
+        # --- MODIFIED: Replaced barrier arguments with Augmented Lagrangian arguments ---
         "delta",
         "gamma",
-        "mu",
-        "mu_lip",
-        "eta",
+        "rho",         # Penalty parameter for margin constraint
+        "rho_lip",     # Penalty parameter for Lipschitz constraint
         "warmup_epochs",
     ]
     adv_required_args = [
@@ -81,38 +81,58 @@ def check_required_args(args: object, eval_only: bool = False) -> None:
         raise ValueError(
             "Cannot use custom train loss without a custom adversarial loss (see docs)"
         )
-
-
-def calculate_barrier_losses(
+    
+def calculate_augmented_lagrangian_losses(
     model: ch.nn.Module,
     model_logits,
     target,
     args,
-    current_mu: float,
-    current_mu_lip: float,
+    lambda_margin,
+    lambda_lip,
 ):
-    """Calculate margin and Lipschitz barrier losses."""
+    """Calculate margin and Lipschitz augmented Lagrangian losses."""
     global device
 
-    loss_bar, current_margins = logarithmic_barrier_loss(model_logits, target, args.delta, current_mu)
+    # 1. Margin component: Calculated using the refactored function
+    loss_aug_lag_margin, margin_violations, current_margins = augmented_lagrangian_margin_loss(
+        logits=model_logits,
+        labels=target,
+        delta=args.delta,
+        rho=args.rho,
+        lambda_margin=lambda_margin
+    )
 
+    # 2. Lipschitz component (logic remains here as it inspects the model layers)
     num_spectral_norm_layers = 0
-    current_lip_bar_sum = ch.tensor(0.0, device=device)
-    gamma_violations = 0
+    total_lip_violations = ch.tensor(0.0, device=device)
+    gamma_violations_count = 0
 
     for m in model.modules():
         spectral_norm_val = get_spectral_norm(m)
         if spectral_norm_val is not None:
             num_spectral_norm_layers += 1
-            log_arg_lip = ch.clamp_min(args.gamma - spectral_norm_val, 1e-8)
-            current_lip_bar_sum += -current_mu_lip * ch.log(log_arg_lip)
+            # Constraint is spectral_norm <= gamma, so violation g(x) = spectral_norm - gamma
+            lip_violation = spectral_norm_val - args.gamma
+            total_lip_violations += lip_violation
 
-            if spectral_norm_val >= args.gamma:
-                gamma_violations += 1
+            if spectral_norm_val.item() > args.gamma:
+                gamma_violations_count += 1
+    
+    # Use a single lambda for the average violation across all layers
+    avg_lip_violation = total_lip_violations / max(num_spectral_norm_layers, 1)
 
-    lip_bar = current_lip_bar_sum / max(num_spectral_norm_layers, 1)
+    # Augmented Lagrangian loss for the Lipschitz constraint
+    term_in_max_lip = (lambda_lip + args.rho_lip * avg_lip_violation).clamp_min_(0)
+    loss_aug_lag_lip = (ch.pow(term_in_max_lip, 2) - ch.pow(lambda_lip, 2)) / (2 * args.rho_lip)
 
-    return loss_bar, lip_bar, current_margins, gamma_violations
+    return (
+        loss_aug_lag_margin,
+        loss_aug_lag_lip,
+        current_margins,
+        gamma_violations_count,
+        margin_violations.detach(),
+        avg_lip_violation.detach(),
+    )
 
 
 def eval_model_autoattack(
@@ -276,6 +296,7 @@ def eval_model(args: object, model: ch.nn.Module, loader: Iterable, wandb_run: A
     start_time = time.time()
 
     # Nat eval loop
+    # --- MODIFIED: Pass None for new dual variables ---
     returned_metrcis = _model_loop(
         args=args,
         loop_type="val",
@@ -284,8 +305,8 @@ def eval_model(args: object, model: ch.nn.Module, loader: Iterable, wandb_run: A
         opt=None,
         epoch=0,
         adv=False,
-        current_mu=0,
-        lambda_dual=None,
+        lambda_margin=None,
+        lambda_lip=None,
     )
     nat_accuracy = returned_metrcis["accuracy_avg"]
     nat_loss = returned_metrcis["losses_avg"]
@@ -295,6 +316,7 @@ def eval_model(args: object, model: ch.nn.Module, loader: Iterable, wandb_run: A
         args.eps = eval(str(args.eps)) if has_attr(args, "eps") else None
         args.attack_lr = eval(str(args.attack_lr)) if has_attr(args, "attack_lr") else None
         # Adv eval loop
+        # --- MODIFIED: Pass None for new dual variables ---
         returned_metrcis = _model_loop(
             args=args,
             loop_type="val",
@@ -303,8 +325,8 @@ def eval_model(args: object, model: ch.nn.Module, loader: Iterable, wandb_run: A
             opt=None,
             epoch=0,
             adv=True,
-            current_mu=0,
-            lambda_dual=None,
+            lambda_margin=None,
+            lambda_lip=None,
         )
         adv_accuracy = returned_metrcis["accuracy_avg"]
         adv_loss = returned_metrcis["losses_avg"]
@@ -371,9 +393,9 @@ def train_model(
             best_acc = _model_loop(args, "val", val_loader, model, None, start_epoch - 1, args.adv_train)["accuracy_avg"]
 
     start_time = time.time()
-    current_mu = args.mu
-    current_mu_lip = args.mu_lip
-    lambda_dual = ch.tensor([0.0]).to(device=device)
+    # --- MODIFIED: Replaced mu and lambda_dual with AL-specific dual variables ---
+    lambda_margin = ch.tensor(0.0, device=device) # Lagrange multiplier for margin
+    lambda_lip = ch.tensor(0.0, device=device)    # Lagrange multiplier for Lipschitz
     gamma_violation_tracker = {}
 
     for epoch in range(start_epoch, args.epochs):
@@ -381,13 +403,17 @@ def train_model(
         print(f"\n--- Epoch {epoch + 1}/{args.epochs} ---")
 
         # Train for one epoch
-        returned_metrics = _model_loop(args, "train", train_loader, model, opt, epoch, args.adv_train, current_mu, current_mu_lip, lambda_dual, is_warmup_phase, gamma_violation_tracker)
+        # --- MODIFIED: Pass and receive new dual variables ---
+        returned_metrics = _model_loop(args, "train", train_loader, model, opt, epoch, args.adv_train, lambda_margin, lambda_lip, is_warmup_phase, gamma_violation_tracker)
         train_acc = returned_metrics["accuracy_avg"]
         train_loss = returned_metrics["losses_avg"]
         train_avg_margins = returned_metrics["avg_margins"]
         train_gamma_violation_avg = returned_metrics["gamma_violation_meter_avg"]
         metrics_cache = returned_metrics["metrics_cache"]
-        lambda_dual = returned_metrics["lambda_dual"]
+        # --- MODIFIED: Update dual variables from loop return ---
+        lambda_margin = returned_metrics["lambda_margin"]
+        lambda_lip = returned_metrics["lambda_lip"]
+
 
         if wandb_run and metrics_cache:
             for log_item in metrics_cache:
@@ -402,7 +428,7 @@ def train_model(
 
         adv_val_acc, adv_val_loss, adv_avg_margins, gamma_violation_avg = (float("nan"),) * 4
         if args.adv_eval or args.adv_train:
-            returned_metrics = _model_loop(args, "val", val_loader, model, None, epoch, True, current_mu, current_mu_lip, lambda_dual, is_warmup_phase, gamma_violation_tracker)
+            returned_metrics = _model_loop(args, "val", val_loader, model, None, epoch, True)
             adv_val_acc = returned_metrics["accuracy_avg"]
             adv_val_loss = returned_metrics["losses_avg"]
             adv_avg_margins = returned_metrics["avg_margins"]
@@ -429,7 +455,9 @@ def train_model(
                 "val/nat_acc": nat_acc,
                 "train/epoch_loss": train_loss,
                 "train/epoch_acc": train_acc,
-                "train/epoch_lambda_dual": lambda_dual.mean().item(),
+                # --- MODIFIED: Log new dual variables ---
+                "train/epoch_lambda_margin": lambda_margin.mean().item(),
+                "train/epoch_lambda_lip": lambda_lip.item(),
                 "train/epoch_avg_margins": train_avg_margins,
                 "train/epoch_gamma_violation_avg": train_gamma_violation_avg,
                 "val/adv_loss": adv_val_loss,
@@ -453,15 +481,14 @@ def train_model(
 
         if schedule:
             schedule.step()
-        # no mu decay for now
-        # current_mu *= 0.9
-        # current_mu_lip *= 0.9
     return model
 
 
+# --- MODIFIED: Changed function signature to accept lambda_margin and lambda_lip ---
 def _model_loop(
-    args, loop_type, loader, model, opt, epoch: int, adv, current_mu=0.0, current_mu_lip=0.0,
-    lambda_dual=None, is_warmup_phase=False, gamma_violation_tracker=None
+    args, loop_type, loader, model, opt, epoch: int, adv, 
+    lambda_margin=None, lambda_lip=None,
+    is_warmup_phase=False, gamma_violation_tracker=None
 ) -> dict[str, Any]:
     """Internal function for training or evaluation loop over a single epoch."""
     global global_step, device
@@ -469,7 +496,8 @@ def _model_loop(
     model = model.train() if is_train else model.eval()
 
     losses, acc_meter = AverageMeter(), AverageMeter()
-    margin_barrier_losses, lip_barrier_losses = AverageMeter(), AverageMeter()
+    # --- MODIFIED: Meters are now for Augmented Lagrangian loss terms ---
+    margin_al_losses, lip_al_losses = AverageMeter(), AverageMeter()
     avg_margins, gamma_violation_meter = AverageMeter(), AverageMeter()
     ce_loss_meter = AverageMeter()
     metrics_cache = []
@@ -498,16 +526,24 @@ def _model_loop(
         ce_loss = train_criterion(model_logits, target).mean()
         ce_loss_meter.update(ce_loss.item(), inp.size(0))
 
-        loss_bar, lip_bar, current_margins, gamma_violations = ch.tensor(0.0, device=device), ch.tensor(0.0, device=device), None, 0
+        loss_aug_lag_margin, loss_aug_lag_lip = ch.tensor(0.0, device=device), ch.tensor(0.0, device=device)
+        current_margins, gamma_violations, margin_violations, avg_lip_violation = None, 0, None, None
 
         if is_train and not is_warmup_phase:
-            loss_bar, lip_bar, current_margins, gamma_violations = calculate_barrier_losses(model, model_logits, target, args, current_mu, current_mu_lip)
-            margin_barrier_losses.update(loss_bar.item(), inp.size(0))
-            lip_barrier_losses.update(lip_bar.item(), inp.size(0))
+            # --- MODIFIED: Calculate AL loss instead of barrier loss ---
+            (
+                loss_aug_lag_margin, loss_aug_lag_lip, current_margins,
+                gamma_violations, margin_violations, avg_lip_violation
+            ) = calculate_augmented_lagrangian_losses(
+                model, model_logits, target, args, lambda_margin, lambda_lip
+            )
+            margin_al_losses.update(loss_aug_lag_margin.item(), inp.size(0))
+            lip_al_losses.update(loss_aug_lag_lip.item(), inp.size(0))
             if current_margins is not None: avg_margins.update(current_margins.mean().item(), inp.size(0))
         gamma_violation_meter.update(gamma_violations, 1)
 
-        loss = ce_loss + loss_bar + lip_bar
+        # --- MODIFIED: Total loss now uses AL terms ---
+        loss = ce_loss + loss_aug_lag_margin + loss_aug_lag_lip
         if has_attr(args, "regularizer"):
             loss += args.regularizer(model, inp, target)
         losses.update(loss.item(), inp.size(0))
@@ -529,10 +565,16 @@ def _model_loop(
             
             project_weights_after_step(model)
             
-            if not is_warmup_phase and current_margins is not None:
-                if lambda_dual is not None and lambda_dual.shape[0] != inp.shape[0]:
-                    lambda_dual = ch.zeros(inp.shape[0], device=device)
-                lambda_dual = (lambda_dual + args.eta * current_margins.detach()).clamp_min_(0)
+            # --- MODIFIED: New dual variable update for Augmented Lagrangian ---
+            if not is_warmup_phase:
+                if margin_violations is not None:
+                    # Ensure lambda_margin has the correct batch dimension
+                    if lambda_margin is not None and lambda_margin.shape != margin_violations.shape:
+                        lambda_margin = ch.zeros_like(margin_violations)
+                    lambda_margin = (lambda_margin + args.rho * margin_violations).clamp_min_(0)
+                
+                if avg_lip_violation is not None:
+                    lambda_lip = (lambda_lip + args.rho_lip * avg_lip_violation).clamp_min_(0)
 
             iteration_log_dict = {
                 "iter_step": global_step, "global_step": global_step,
@@ -540,9 +582,10 @@ def _model_loop(
                 "train/iter_acc": batch_acc,
             }
             if not is_warmup_phase:
+                # --- MODIFIED: Log AL loss terms ---
                 iteration_log_dict.update({
-                    "train/iter_margin_barrier_loss": loss_bar.item(),
-                    "train/iter_lip_barrier_loss": lip_bar.item(),
+                    "train/iter_margin_al_loss": loss_aug_lag_margin.item(),
+                    "train/iter_lip_al_loss": loss_aug_lag_lip.item(),
                     "train/iter_gamma_violations": gamma_violations,
                 })
                 if current_margins is not None:
@@ -552,13 +595,17 @@ def _model_loop(
         desc = f"{loop_msg} E{epoch:>3d}"
         base_stats = {"Loss": f"{losses.avg:.3f}", "CE": f"{ce_loss_meter.avg:.3f}", "Acc": f"{acc_meter.avg:.2f}%"}
         if is_train and not is_warmup_phase:
-            barrier_stats = {"MgnB": f"{margin_barrier_losses.avg:.3f}", "LipB": f"{lip_barrier_losses.avg:.3f}"}
-            if avg_margins.count > 0: barrier_stats["Mgn"] = f"{avg_margins.avg:.3f}"
-            base_stats.update(barrier_stats)
+            # --- MODIFIED: Update progress bar description ---
+            al_stats = {"MgnAL": f"{margin_al_losses.avg:.3f}", "LipAL": f"{lip_al_losses.avg:.3f}"}
+            if avg_margins.count > 0: al_stats["Mgn"] = f"{avg_margins.avg:.3f}"
+            base_stats.update(al_stats)
         iterator.set_description(f"{desc} | {' | '.join(f'{k} {v}' for k, v in base_stats.items())}")
 
     return {
-        "accuracy_avg": acc_meter.avg, "losses_avg": losses.avg, "lambda_dual": lambda_dual,
+        "accuracy_avg": acc_meter.avg, "losses_avg": losses.avg,
+        # --- MODIFIED: Return updated dual variables ---
+        "lambda_margin": lambda_margin,
+        "lambda_lip": lambda_lip,
         "avg_margins": avg_margins.avg, "gamma_violation_meter_avg": gamma_violation_meter.avg,
         "metrics_cache": metrics_cache,
     }

@@ -9,13 +9,15 @@ from argparse import ArgumentParser
 import cox
 import cox.utils
 from dotenv import load_dotenv
+import torch as ch
 
 import wandb
 
 try:
     from . import __version__, defaults
-    from .barrier_train import eval_model as eval_barrier_model
-    from .barrier_train import train_model as train_barrier_model
+    # --- MODIFIED: Changed alias for clarity, assuming barrier_train.py contains the AL implementation ---
+    from .barrier_train import eval_model as eval_al_model
+    from .barrier_train import train_model as train_al_model
     from .datasets import DATASETS
     from .defaults import check_and_fill_args
     from .model_utils import make_and_restore_model
@@ -40,10 +42,17 @@ def main(args):
     """
     load_dotenv()
 
+    if args.loss_type == "augmented_lagrangian":
+        run_name = f"AL_gamma_{args.gamma}-delta_{args.delta}-rho_{args.rho}-rho_lip_{args.rho_lip}"
+    elif args.loss_type == "margin_barrier":
+         run_name = f"Barrier_gamma_{args.gamma}-delta_{args.delta}"
+    else:
+        run_name = f"Standard_CE"
+
     wandb_run = wandb.init(
-        project="robustness_barrier_training",
-        config=args.dict,
-        name=f"imp_gamma_{args.gamma}-delta_{args.delta}",
+        project="robustness_augmented_lagrangian", # Renamed project for clarity
+        config=args.as_dict(), # Use as_dict() for cox.utils.Parameters
+        name=run_name,
     )
 
     wandb.define_metric("epoch_val")
@@ -64,32 +73,36 @@ def main(args):
 
     # MAKE MODEL
     model, checkpoint = make_and_restore_model(arch=args.arch, dataset=dataset, resume_path=args.resume)
+
     if "module" in dir(model):
         model = model.module
 
     if not args.resume_optimizer:
         checkpoint = None
 
-    if args.loss_type == "margin_barrier":
-        print(f"Using barrier training with loss type: {args.loss_type}")
-        model = train_barrier_model(args, model, loaders, checkpoint=checkpoint, wandb_run=wandb_run)
+    # --- MODIFIED: Changed logic to select training method ---
+    if args.eval_only:
+        print("Evaluation mode, skipping training.")
+    elif args.loss_type == "augmented_lagrangian":
+        print(f"Using Augmented Lagrangian training with loss type: {args.loss_type}")
+        model = train_al_model(args, model, loaders, checkpoint=checkpoint, wandb_run=wandb_run)
+    elif args.loss_type == "margin_barrier":
+        raise NotImplementedError("The 'margin_barrier' method is now legacy. Use 'augmented_lagrangian'.")
     else:  # Default to 'ce' or any other standard training
         print(f"Using standard training with loss type: {args.loss_type}")
-        model = train_standard_model(args, model, loaders, store=None, checkpoint=checkpoint)
+        model = train_standard_model(args, model, loaders, checkpoint=checkpoint)
 
     print(args)
-    # if args.eval_only:
-    if args.loss_type == "margin_barrier":
-        return_val = eval_barrier_model(args, model, val_loader, wandb_run)
-        wandb.finish()
-        return return_val
+    
+    # --- MODIFIED: Unified evaluation logic at the end ---
+    print("Running final evaluation...")
+    if args.loss_type == "augmented_lagrangian":
+        return_val = eval_al_model(args, model, val_loader, wandb_run)
     else:
-        return_val = eval_standard_model(args, model, val_loader, wandb_run)
-        wandb.finish()
-        return return_val
-
-    # wandb.finish()
-    # return model
+        return_val = eval_standard_model(args, model, val_loader, wandb_run=wandb_run)
+    
+    wandb.finish()
+    return return_val
 
 
 def setup_args(args):
@@ -98,7 +111,6 @@ def setup_args(args):
     :mod:`robustness.defaults`, and also perform a sanity check to make sure no
     args are missing.
     """
-
     ds_class = DATASETS[args.dataset]
     args = check_and_fill_args(args, defaults.CONFIG_ARGS, ds_class)
 
@@ -111,6 +123,10 @@ def setup_args(args):
     args = check_and_fill_args(args, defaults.MODEL_LOADER_ARGS, ds_class)
     if args.eval_only:
         assert args.resume is not None, "Must provide a resume path if only evaluating"
+    
+    # --- INFO: Make sure `defaults.py` handles the new `loss_type` and its hyperparameters ---
+    # For example, when `args.loss_type == 'augmented_lagrangian'`, `check_and_fill_args`
+    # should ensure that `rho` and `rho_lip` have appropriate default values.
     return args
 
 
@@ -120,4 +136,5 @@ if __name__ == "__main__":
 
     args = setup_args(args)
 
-    final_model = main(args)
+    final_results = main(args)
+    print(final_results)
