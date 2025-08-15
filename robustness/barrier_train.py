@@ -453,8 +453,9 @@ def train_model(
 
         if schedule:
             schedule.step()
-        current_mu *= 0.9
-        current_mu_lip *= 0.9
+        # no mu decay for now
+        # current_mu *= 0.9
+        # current_mu_lip *= 0.9
     return model
 
 
