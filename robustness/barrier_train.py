@@ -394,6 +394,7 @@ def train_model(
 
     start_time = time.time()
     # --- MODIFIED: Replaced mu and lambda_dual with AL-specific dual variables ---
+    # FIX #4: Initialize lambdas here so they don't reset every epoch.
     lambda_margin = ch.tensor(0.0, device=device) # Lagrange multiplier for margin
     lambda_lip = ch.tensor(0.0, device=device)    # Lagrange multiplier for Lipschitz
     gamma_violation_tracker = {}
@@ -411,6 +412,7 @@ def train_model(
         train_gamma_violation_avg = returned_metrics["gamma_violation_meter_avg"]
         metrics_cache = returned_metrics["metrics_cache"]
         # --- MODIFIED: Update dual variables from loop return ---
+        # FIX #4: Update lambdas with the new values returned from the training loop for the next epoch.
         lambda_margin = returned_metrics["lambda_margin"]
         lambda_lip = returned_metrics["lambda_lip"]
 
@@ -456,7 +458,7 @@ def train_model(
                 "train/epoch_loss": train_loss,
                 "train/epoch_acc": train_acc,
                 # --- MODIFIED: Log new dual variables ---
-                "train/epoch_lambda_margin": lambda_margin.mean().item(),
+                "train/epoch_lambda_margin": lambda_margin.item(),
                 "train/epoch_lambda_lip": lambda_lip.item(),
                 "train/epoch_avg_margins": train_avg_margins,
                 "train/epoch_gamma_violation_avg": train_gamma_violation_avg,
@@ -532,8 +534,9 @@ def _model_loop(
         loss_aug_lag_margin, loss_aug_lag_lip = ch.tensor(0.0, device=device), ch.tensor(0.0, device=device)
         current_margins, gamma_violations, margin_violations, avg_lip_violation = None, 0, None, None
 
+        # FIX #1: CE-Only Warmup
+        # Augmented Lagrangian penalties are only calculated and added if not in the warmup phase.
         if is_train and not is_warmup_phase:
-            # --- MODIFIED: Calculate AL loss instead of barrier loss ---
             (
                 loss_aug_lag_margin, loss_aug_lag_lip, current_margins,
                 gamma_violations, margin_violations, avg_lip_violation
@@ -545,7 +548,7 @@ def _model_loop(
             if current_margins is not None: avg_margins.update(current_margins.mean().item(), inp.size(0))
         gamma_violation_meter.update(gamma_violations, 1)
 
-        # --- MODIFIED: Total loss now uses AL terms ---
+        # Total loss is CE loss during warmup, and includes AL terms otherwise
         loss = ce_loss + loss_aug_lag_margin + loss_aug_lag_lip
         if has_attr(args, "regularizer"):
             loss += args.regularizer(model, inp, target)
@@ -564,22 +567,27 @@ def _model_loop(
         if is_train:
             opt.zero_grad()
             loss.backward()
+
+            # FIX #2: Robust Gradient Handling
+            # First, clip the gradient norm to a max value.
+            total_norm = ch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             
-            # --- ADDED: Gradient Clipping ---
-            ch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # Then, skip the optimizer step entirely if the norm is inf or NaN.
+            if not ch.isfinite(total_norm):
+                warnings.warn(f"Gradient norm is not finite ({total_norm}). Skipping optimizer step.")
+            else:
+                opt.step()
+                project_weights_after_step(model)
             
-            opt.step()
-            
-            project_weights_after_step(model)
-            
-            # --- MODIFIED: New dual variable update for Augmented Lagrangian ---
+            # FIX #1 & #3: Dual variable updates only happen after warmup, using safe scalar logic.
             if not is_warmup_phase:
+                # FIX #3: Safe Scalar lambda Updates
+                # The code now correctly treats lambda_margin as a scalar and
+                # updates it based on the mean violation of the batch.
                 if margin_violations is not None:
-                    # Ensure lambda_margin has the correct batch dimension
-                    if lambda_margin is not None and lambda_margin.shape != margin_violations.shape:
-                        lambda_margin = ch.zeros_like(margin_violations)
-                    lambda_margin = (lambda_margin + args.rho * margin_violations).clamp_min_(0)
-                
+                    avg_margin_violation = margin_violations.mean()
+                    lambda_margin = (lambda_margin + args.rho * avg_margin_violation).clamp_min_(0)
+
                 if avg_lip_violation is not None:
                     lambda_lip = (lambda_lip + args.rho_lip * avg_lip_violation).clamp_min_(0)
 
@@ -589,7 +597,6 @@ def _model_loop(
                 "train/iter_acc": batch_acc,
             }
             if not is_warmup_phase:
-                # --- MODIFIED: Log AL loss terms ---
                 iteration_log_dict.update({
                     "train/iter_margin_al_loss": loss_aug_lag_margin.item(),
                     "train/iter_lip_al_loss": loss_aug_lag_lip.item(),
@@ -602,7 +609,6 @@ def _model_loop(
         desc = f"{loop_msg} E{epoch:>3d}"
         base_stats = {"Loss": f"{losses.avg:.3f}", "CE": f"{ce_loss_meter.avg:.3f}", "Acc": f"{acc_meter.avg:.2f}%"}
         if is_train and not is_warmup_phase:
-            # --- MODIFIED: Update progress bar description ---
             al_stats = {"MgnAL": f"{margin_al_losses.avg:.3f}", "LipAL": f"{lip_al_losses.avg:.3f}"}
             if avg_margins.count > 0: al_stats["Mgn"] = f"{avg_margins.avg:.3f}"
             base_stats.update(al_stats)
@@ -610,7 +616,7 @@ def _model_loop(
 
     return {
         "accuracy_avg": acc_meter.avg, "losses_avg": losses.avg,
-        # --- MODIFIED: Return updated dual variables ---
+        # Return updated dual variables so they persist across epochs
         "lambda_margin": lambda_margin,
         "lambda_lip": lambda_lip,
         "avg_margins": avg_margins.avg, "gamma_violation_meter_avg": gamma_violation_meter.avg,
