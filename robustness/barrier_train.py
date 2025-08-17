@@ -462,13 +462,12 @@ def train_model(
                 "train/epoch_gamma_violation_avg": train_gamma_violation_avg,
                 "val/adv_loss": adv_val_loss,
                 "val/adv_acc": adv_val_acc,
-                "val/avg_margins": adv_avg_margins,
                 "total_time": time.time() - start_time,
                 "gamma_violations/total_this_epoch": total_violations_this_epoch,
                 "gamma_violations/metric": gamma_violation_metric,
             }
-            if not is_warmup_phase:
-                wandb_log_dict["val/gamma_violations_avg"] = gamma_violation_avg
+            # if not is_warmup_phase:
+            #     wandb_log_dict["val/gamma_violations_avg"] = gamma_violation_avg
             wandb_run.log(wandb_log_dict, commit=True)
 
         last_epoch = epoch == (args.epochs - 1)
@@ -503,7 +502,7 @@ def _model_loop(
     metrics_cache = []
 
     loop_msg = "Train" if is_train else "Val"
-    train_criterion = args.custom_train_loss if has_attr(args, "custom_train_loss") else ch.nn.CrossEntropyLoss()
+    train_criterion = ch.nn.CrossEntropyLoss()
     adv_criterion = args.custom_adv_loss if has_attr(args, "custom_adv_loss") else None
 
     attack_kwargs = {}
@@ -522,6 +521,10 @@ def _model_loop(
         inp, target = inp.to(device, non_blocking=True), target.to(device, non_blocking=True)
         output, _ = model(inp, target=target, make_adv=adv, **attack_kwargs)
         model_logits = output[0] if isinstance(output, tuple) else output
+
+        if ch.isnan(model_logits).any() or ch.isinf(model_logits).any():
+            print("Warning: Unstable logits detected!")
+            print(model_logits)
 
         ce_loss = train_criterion(model_logits, target).mean()
         ce_loss_meter.update(ce_loss.item(), inp.size(0))
@@ -561,6 +564,10 @@ def _model_loop(
         if is_train:
             opt.zero_grad()
             loss.backward()
+            
+            # --- ADDED: Gradient Clipping ---
+            ch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             opt.step()
             
             project_weights_after_step(model)
